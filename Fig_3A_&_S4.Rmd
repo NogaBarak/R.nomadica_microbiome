@@ -1,0 +1,278 @@
+---
+title: "Figure 3"
+output: html_notebook
+---
+
+```{r message=FALSE, warning=FALSE}
+library(microbiomer)
+library(tidyverse)
+library(glue)
+library(purrr)
+library(stringr)
+library(ggpubr)
+library(rstatix)
+```
+
+```{r}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/")
+# Load phyloseq object
+biome_phyloseq<-readRDS("./processed_data/bloom_phyloseq")
+sample_data(biome_phyloseq)$Tissue_type <- ifelse(grepl("Bw", sample_data(biome_phyloseq)$Sample_name), "Bell wounded", sample_data(biome_phyloseq)$Tissue_type)
+
+# All samples without controls 
+phy_jelly<- biome_phyloseq %>%
+                          subset_samples(.,Tissue_type %in% 
+                                    c("Bell",
+                                      "Tentacles",
+                                      "GVC",
+                                      "Gonads"))%>%  
+                          pres_abund_filter(., pres = 2,abund =0, verbose = TRUE) 
+taxa_names(phy_jelly) <- paste0("ASV", seq(ntaxa(phy_jelly)))
+
+phy_jelly_no_19 <-phy_jelly %>%
+                          subset_samples(.,
+                                      Year!="2019") %>% 
+                          pres_abund_filter(., pres = 2,abund =0, verbose = TRUE) 
+
+sum(phy_jelly_no_19@sam_data$Month=="Feb")
+sum(phy_jelly_no_19@sam_data$Month=="Jun")
+sum(phy_jelly_no_19@sam_data$Month=="Jul")
+
+sum(phy_jelly_no_19@sam_data$Tissue_type=="Bell")
+sum(phy_jelly_no_19@sam_data$Tissue_type=="Tentacles")
+sum(phy_jelly_no_19@sam_data$Tissue_type=="GVC")
+sum(phy_jelly_no_19@sam_data$Tissue_type=="Gonads")
+```
+
+```{r}
+asv_counts<- psmelt(phy_jelly) %>%
+  select(Sample_name,OTU)
+
+asv_taxa_meta<-psmelt(phy_jelly) %>%
+        mutate(Genus_ASV = glue("{OTU}:{Genus}"))
+
+asv_taxa_meta_no_19<- asv_taxa_meta %>% 
+                          subset(Year!= "2019")
+```
+
+#Transform the sample counts to relative abundance, calculte mean relative abundance, pool all taxa with relative abundance of <1%, plot at the ASV level
+## Without 2019
+2019 was the only year we didn't collected samples with separate tool kit, as it more prone to error I wanted to do analysis without 2019:July)
+
+```{r}
+colors_genus_otu<-c( "ASV1:Endozoicomonas" = "#930CED",                                  
+                    "ASV2:Rickettsiales_uncl" = "#6B91E6",
+                    "ASV3:type_III_uncl" = "#4B0920",
+                    "ASV4:Simkaniaceae_uncl" = "#9A4516",
+                    "ASV5:Tenacibaculum" = "#8DCA0B",
+                    'ASV23:Flavobacteriaceae_uncl'="#628D07",
+                    "ASV6:Bacteroides" = "#364E04",
+                    "ASV13:Bacteroides" = "#A5B582",
+                    "ASV7:Variovorax" = "#7f56b0",
+                    "ASV9:Gammaproteobacteria_uncl" = "#4A007E",
+                    "ASV15:Serratia" = "#7B208B",
+                    "ASV10:Vibrio" = "#C99EF2",
+                    "ASV25:Vibrio" = "#B694D4",
+                    "ASV69:Vibrio" = "#C99EF2",
+                    "ASV71:Vibrio"= "#C99EF2",
+                    "ASV11:Mycoplasma" = "#FF4D6D",
+                    "ASV21:Mycoplasma" = "#FCA4B4",
+                    "ASV12:Helicobacteraceae_uncl" = "#D62828",
+                    "ASV20:Helicobacteraceae_uncl" = "#CF6D6D",
+                    "ASV14:Alkalibacterium" = "#9E174D",
+                    "ASV16:Candidatus_Hepatoplasma" = "#FFAB5C",
+                    "ASV18:Endozoicomonas" = "#B682D9",
+                    "ASV19:Shewanella" = "gold4",
+                    "ASV23:Fulvibacter" = "#579D1C",
+                    "ASV24:Aquabacterium" = "#E7F48D",
+                    "ASV26:Enhydrobacter" = "#DCFFFF",
+                    "ASV27:Terasakiellaceae_uncl" = "#3B70A1",
+                    "ASV29:Alkalibacterium" = "#E599C4",
+                    "ASV37:Methylobacterium-Methylorubrum" = "#18874B",
+                    "ASV39:Bradymonadaceae_uncl" = "#85E296",
+                    "ASV72:Allorhizobium-Neorhizobium-Pararhizobium-Rhizobium" = "yellow4",
+                    "ASV87:Tenacibaculum" = "#A1CE42",
+                    "ASV88:Psychrobium" = "#5A349E",
+                    "ASV116:Aliivibrio" = "#FFD31F",
+                    "ASV210:Alteromonadales_uncl" = "#D8B4FF",
+                    "Other taxa" = "#A9A9A9")
+
+```
+
+## All samples divided to months 
+```{r include=FALSE}
+# For all samples
+# Reshape the data from wide to long format
+asv_rel_abund_no_19 <- asv_taxa_meta_no_19 %>% 
+  group_by(Sample_name) %>%
+  mutate(rel_abund = Abundance / sum(Abundance) * 100) %>%
+  ungroup() %>%
+  select(-Abundance) %>%
+  pivot_longer(c("Phylum", "Class", "Order", "Family", "Genus", "OTU", "Genus_ASV"),
+               names_to = "level",
+               values_to = "taxon") %>% 
+  mutate(Tissue_type = factor(Tissue_type),
+         Month = factor(Month)) %>% 
+  select(Sample_name, rel_abund, month_year, Tissue_type, Month, level, taxon)
+
+mean_rel_abund_genus_no_19 <- asv_rel_abund_no_19 %>%
+  filter(level == "Genus_ASV") %>%
+  group_by(Month,Tissue_type, taxon) %>%
+  summarize(mean_rel_abund = mean(rel_abund), .groups = "drop")
+
+pool_genus_no_19 <- mean_rel_abund_genus_no_19 %>%
+  group_by(Month, Tissue_type,taxon) %>%
+  summarize(pool = max(mean_rel_abund) < 1,
+            mean = mean(mean_rel_abund),
+            max = max(mean_rel_abund),
+            .groups = "drop")
+
+Without_2019 <- inner_join(mean_rel_abund_genus_no_19, pool_genus_no_19, by = c("Tissue_type", "Month", "taxon"))
+
+data_no_2019 <- Without_2019 %>%
+  mutate(taxon = if_else(pool, "Other taxa", taxon)) %>%
+  mutate(ASV_number = if_else(taxon == "Other taxa", Inf, as.numeric(str_extract(taxon, "\\d+"))),
+         taxon = factor(taxon),
+         Month = fct_relevel(Month, "Feb", "Jun", "Jul")) %>%
+  group_by(Month,Tissue_type) %>%
+  mutate(mean_rel_abund = mean_rel_abund / sum(mean_rel_abund) * 100) %>% # Renormalization step
+  ungroup() %>%
+  mutate(taxon = factor(taxon),
+         taxon = fct_reorder(taxon, mean_rel_abund, .desc = FALSE),
+         taxon = fct_shift(taxon, n = 1),
+         taxon = fct_relevel(taxon, "ASV1:Endozoicomonas",
+                                   "ASV18:Endozoicomonas",
+                                   "ASV2:Rickettsiales_uncl",
+                                   "ASV3:type_III_uncl",
+                                   "ASV4:Simkaniaceae_uncl",
+                                   "ASV5:Tenacibaculum",
+                                   "ASV6:Bacteroides",
+                                   "ASV13:Bacteroides",
+                                   "ASV7:Variovorax",
+                                   "ASV9:Gammaproteobacteria_uncl",
+                                   "ASV11:Mycoplasma",
+                                   "ASV21:Mycoplasma",
+                                   "ASV12:Helicobacteraceae_uncl",
+                                   "ASV14:Alkalibacterium",
+                                   "ASV15:Serratia",
+                                   "ASV16:Candidatus_Hepatoplasma",
+                                   "ASV19:Shewanella",
+                                   "ASV24:Aquabacterium",
+                                   "ASV25:Vibrio",
+                                   "ASV26:Enhydrobacter",
+                                   "ASV29:Alkalibacterium",
+                                   "ASV39:Bradymonadaceae_uncl",
+                                   "Other taxa"))
+
+facet_labels <- c('Bell' = "Bell (n=29)",
+                  'Gonads' = "Gonads (n=31)",
+                  'GVC' = "GVC (n=31)",
+                  'Tentacles' = "Tentacles (n=31)")
+# Plotting
+ggplot(data_no_2019, aes(x = Month, y = mean_rel_abund, fill = taxon)) +
+  geom_col() +
+  facet_wrap(~Tissue_type, nrow = 1, labeller = labeller(Tissue_type = facet_labels))+
+  scale_fill_manual(name = NULL, values = colors_genus_otu) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = NULL,
+       y = "Mean Relative Sequence Abundance (%)") +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.background = element_blank(),       
+        strip.text = element_text(face = "bold"))
+```
+
+```{r}
+pdf("./bar.pdf",width = 5.2,height = 4.2)
+ggplot(data_no_2019, aes(x = Month, y = mean_rel_abund, fill = taxon)) +
+  geom_col() +
+  facet_wrap(~Tissue_type, nrow = 1, labeller = labeller(Tissue_type = facet_labels))+
+  scale_fill_manual(name = NULL, values = colors_genus_otu) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = NULL,
+       y = "Mean Relative Sequence Abundance (%)") +
+  theme_classic() +
+  theme(legend.position = "bottom",
+        strip.background = element_blank(),       
+        strip.text = element_text(face = "bold"))
+dev.off()
+```
+
+## All tissues relative abundance 
+```{r}
+prepare_data_for_plot <- function(tissue) {
+  
+    tissue_bar <- asv_rel_abund_no_19 %>%
+        filter(level %in% c("Genus_ASV"), Tissue_type == tissue) %>%
+        group_by(Sample_name, month_year,Month, taxon, Tissue_type)
+      
+      pool_tissue_bar <- tissue_bar %>%
+        group_by(Sample_name, taxon) %>%
+        summarize(pool = max(rel_abund) < 2,
+                  max = max(rel_abund),
+                  .groups = "drop")
+      
+      tissue_data <- inner_join(tissue_bar, pool_tissue_bar, by = c("taxon", "Sample_name")) %>%
+        mutate(taxon = if_else(pool, "Other taxa", taxon))
+      
+     # Create a data frame that maps each 'taxon' to its 'ASV_number'
+    taxon_order <- tissue_data %>%
+        filter(level %in% c("Genus_ASV"))%>%
+        mutate(ASV_number = if_else(str_detect(taxon, "ASV"), as.numeric(str_extract(taxon, "\\d+")), Inf)) %>%
+        select(taxon, ASV_number) %>%
+        distinct() %>%
+        arrange(ASV_number) %>% 
+        distinct(taxon)
+    
+    # Convert the 'taxon' column to a vector
+    taxon_vector <- taxon_order$taxon
+    
+    # Remove duplicates from the vector
+    taxon_vector <- unique(taxon_vector)
+     
+     tissue_data <- inner_join(tissue_bar, pool_tissue_bar, by = c("taxon", "Sample_name")) %>%
+        mutate(taxon = if_else(pool, "Other taxa", taxon)) %>%
+        mutate(ASV_number = if_else(taxon == "Other taxa", Inf, as.numeric(str_extract(taxon, "\\d+"))),
+               taxon = factor(taxon),
+               taxon = fct_relevel(taxon, taxon_vector),
+               Month = fct_relevel(Month, "Feb", "Jun", "Jul"))
+  
+  return(tissue_data)
+}
+
+# Apply the function to each tissue type
+tissues <- c("Bell", "Gonads", "GVC", "Tentacles")
+
+data_for_plots <- lapply(tissues, prepare_data_for_plot)
+```
+
+## plot all tissues relative abundance
+```{r}
+plot_list <- list()
+for (i in seq_along(data_for_plots)) {
+  # Create a plot for the current element
+  plot <- ggplot(data_for_plots[[i]], aes(x=Sample_name, y=rel_abund, fill=taxon)) +
+    facet_wrap(~Month, scales = "free_x", nrow=1) +
+    geom_col() +
+    scale_fill_manual(name=NULL, values=colors_genus_otu) +
+    scale_y_continuous(expand=c(0, 0)) +
+    labs(x=NULL, y="Relative Abundance (%)") +
+    ggtitle(tissues[i]) +
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          axis.text.y = element_text(size = 8),
+          axis.title = element_text(),
+          legend.position = "right",
+          legend.title = element_text(size = 8)) 
+  
+  # Add the plot to your list
+  plot_list[[i]] <- plot
+}
+plot_all<-ggarrange(plotlist = plot_list, ncol = 2, nrow = 2, common.legend = F,font.label=list(size=8), align = "hv", legend = "bottom")
+```
+
+```{r}
+ggsave(filename="./rel_abund_all_samples.pdf", plot = plot_all, width = 14, height = 10,dpi = 300)
+```
+
+

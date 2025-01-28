@@ -1,0 +1,423 @@
+---
+title: "Top 25 ASVs from R.nomadica vs Seawater samples"
+output: html_notebook
+---
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(phyloseq)
+library(ggpubr)
+library(glue)
+library(microbiomer)
+library(dplyr)
+library(pheatmap)
+library(stringr)
+```
+
+#### Upload R.nomadica phyloseq
+```{r}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/processed_data/")
+
+# Load phyloseq object
+biome_phyloseq<-readRDS("./bloom_phyloseq")
+sample_data(biome_phyloseq)$Tissue_type <- ifelse(grepl("Bw", sample_data(biome_phyloseq)$Sample_name), "Bell wounded", sample_data(biome_phyloseq)$Tissue_type)
+
+# All samples without controls 
+taxa_names(biome_phyloseq) <- paste0("ASV", seq(ntaxa(biome_phyloseq))) 
+
+# Adding a column into the OTU table containing ASV_Genus column (useful in ASV graphic analysis)
+add_otu_genus <- function(ps){
+                  asv_taxa_meta<-tax_table(ps) %>% 
+                           as.data.frame() %>% 
+                           rownames_to_column(var = "OTU") %>% 
+                           mutate(ASV_Genus = glue("{OTU}:{Genus}"))%>% 
+                           column_to_rownames(var = "OTU") %>% 
+                           tax_table() 
+                          
+                  col<-c("Kingdom", "Phylum" ,"Class" , "Order"  ,"Family" ,"Genus",'ASV_Genus') 
+                  row<-taxa_names(ps)
+                  
+                  taxa_names(asv_taxa_meta)<-row
+                  colnames(asv_taxa_meta@.Data)<-col
+                  
+                  tax_table(ps)<-asv_taxa_meta 
+                  return(ps)
+                }
+
+biome_phyloseq <- add_otu_genus(biome_phyloseq)
+
+#Only jellyfish samples 
+rhopilema_ps<- biome_phyloseq %>% 
+                   subset_samples(., Tissue_type %in% c("Bell","Tentacles","GVC","Gonads"),
+                                     Year!="2019") %>% 
+                   prune_taxa(taxa_sums(.) > 99, .) %>% 
+                   prune_samples(sample_sums(.) > 14000, .)%>%  
+                   pres_abund_filter(., pres = 2,abund =0, verbose = TRUE)
+
+# Compute taxa sums
+rhopilema_sum <- taxa_sums(rhopilema_ps) %>% 
+                 sort(., decreasing = TRUE)
+
+# Extract names of the 30 most abundant taxa
+top_25_taxa <- names(rhopilema_sum)[1:25]
+
+#extract the top 30 ASVs from rhopilema to the BLAST+ analysis 
+top_25_rhopilema_ps <- prune_taxa(top_25_taxa,rhopilema_ps)
+``` 
+### Upload sea water 
+# upload sea water data (themo and bloom)
+```{r}
+seawater_bloom_ps <- biome_phyloseq %>% 
+                   subset_samples(., Tissue_type %in% c("Sea water")&
+                                     Year!="2019") %>%
+                   prune_samples(sample_sums(.) > 10000, .) %>% 
+                   prune_taxa(taxa_sums(.) > 0, .)
+
+seawater_bloom_ps <- add_otu_genus(seawater_bloom_ps)
+
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Jen_Project")
+
+phyloseq_jen<-readRDS("./jen_phyloseq")
+
+
+#Subset to only Themo samples (exclude ID 95 because it messed up the NMDS)
+themo_ps<- subset_samples(phyloseq_jen,Cruise_Timepoint %in% c(1:12))%>%
+                   prune_samples(sample_sums(.) > 5000, .) %>% 
+                   prune_taxa(taxa_sums(.) > 50, .)
+
+
+taxa_names(themo_ps) <- paste0("ASV", seq(ntaxa(themo_ps))) 
+
+
+themo_ps <- add_otu_genus(themo_ps)
+                   
+```
+
+Create ASV_Genus column with more info
+```{r}
+# Assuming you have a list of phyloseq objects named physeq_list
+physeq_list <- list(rhopilema_ps,top_25_rhopilema_ps,seawater_bloom_ps,themo_ps)
+
+# Loop through each phyloseq object
+for (i in seq_along(physeq_list)) {
+  # Extract tax_table and perform modifications
+  asv_taxa_meta <- tax_table(physeq_list[[i]]) %>%
+    as.data.frame()
+
+  # Check if 'Species' column exists in the tax_table
+  if ('Species' %in% colnames(asv_taxa_meta)) {
+    # Exclude 'Species' column from the modifications
+    asv_taxa_meta <- asv_taxa_meta %>%
+      subset(select = -Species)
+  }
+
+  # Continue with the modifications using the pipe operator
+  asv_taxa_meta <- asv_taxa_meta %>%
+    rownames_to_column(var = "OTU") %>%
+    mutate(ASV_dataset = glue("{OTU}:{Genus}:{i}")) %>%
+    column_to_rownames(var = "OTU") %>%
+    tax_table()
+
+  # Update tax_table in the original phyloseq object
+  col <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", 'ASV_Genus', 'ASV_dataset')
+  row <- taxa_names(physeq_list[[i]])
+
+  taxa_names(asv_taxa_meta) <- row
+  colnames(asv_taxa_meta@.Data) <- col
+
+  tax_table(tax_table(physeq_list[[i]])) <- asv_taxa_meta
+}
+```
+# Write FASTA from phyloseq
+```{r}
+# Define the output file names
+output_files <- c("asvs_rhopilema.fasta","asvs_cassiopea.fasta", "asvs_tri_mas.fasta","asvs_scyp.fasta", "asvs_aurelia.fasta","top_25_asvs_rhopilema.fasta","asvs_seawater_bloom.fasta","asvs_themo.fasta",'asvs_pulmo.fasta')
+
+# Define the indices of the physeq_list elements you want to process
+indices <- c(1, 2, 3, 4, 5,6,7,8,9)
+
+# Loop over each index
+for (i in seq_along(indices)) {
+  # Get the current index
+  index <- indices[i]
+  
+  # Get the current output file
+  output_file <- output_files[i]
+  
+  # Create the full path to the output file
+  output_path <- paste0("//wsl.localhost/Ubuntu-22.04/home/noga/Jellfish_16S/ncbi_jellyfish_comparison/", output_file)
+  
+  # Apply the ps_to_fasta function
+  ps_to_fasta(physeq_list[[index]], out.file = output_path, seqnames = "ASV_dataset", width = 1000)
+}
+
+# from this stage I'm moving to the linux to preform a BLast+ comprison for each object vs the r.nomadica top 25 taxa.
+```
+
+# Upload BLAST+ results R,nomadica dominant only
+```{r}
+# Set the file path
+setwd ("//wsl.localhost/Ubuntu-22.04/home/noga/Jellfish_16S/ncbi_jellyfish_comparison/")
+
+# Read the file into a data frame
+dominant_themo_blast <- read.table("./themo_vs_dominant_nomadica.txt", header = F, sep = "\t")
+dominant_seawater_bloom_blast <- read.table("./seawater_bloom_vs_dominant_nomadica.txt", header = F, sep = "\t")
+
+
+# Define Blast headers
+blast_headers <- c(
+  "Percentage_Identity",
+  "Alignment_Length",
+  "Mismatches",
+  "Gap_Opens",
+  "Q_Start",
+  "Q_End",
+  "S_Start",
+  "S_End",
+  "E_Value",
+  "Bit_Score"
+)
+# Assign names to the columns
+colnames(dominant_themo_blast) <- c("Themo", "rhopilema",blast_headers)
+colnames(dominant_seawater_bloom_blast) <- c("Seawater_bloom", "rhopilema",blast_headers) 
+
+# Define a function to filter out BLAST resluts
+filter_data <- function(df, asv_col, min_length) {
+  df %>%
+    # Extract the number after "ASV" in the ASV column and convert it to numeric
+    mutate(asv_num = as.numeric(str_extract(!!sym(asv_col), "\\d+"))) %>%
+    subset(Alignment_Length > min_length) %>%
+    group_by(rhopilema) %>%
+    # Keep only the rows where Percentage_Identity is equal to the maximum Percentage_Identity in the group
+    filter(Percentage_Identity == max(Percentage_Identity)) %>%
+    # If there are ties in Percentage_Identity, keep only the row where asv_num is the minimum
+    filter(asv_num == min(asv_num)) %>%
+    ungroup() %>% 
+    select(-asv_num) %>% 
+    mutate(rhopilema_num = as.numeric(str_extract(rhopilema, "\\d+"))) %>% 
+    arrange(rhopilema_num) %>% 
+    select(rhopilema,!!sym(asv_col),Percentage_Identity) %>% 
+    # Rename the Percentage_Identity column
+    rename(!!paste("Percentage_Identity", asv_col, sep = "_") := Percentage_Identity)
+}
+
+# Apply the function to each data frame
+themo_blast_filt <- filter_data(dominant_themo_blast, "Themo", 200)
+seawater_bloom_blast_filt <- filter_data(dominant_seawater_bloom_blast, "Seawater_bloom", 200)
+```
+
+# Create merge df with all jellyfish ASVs, divide data to all jellyfish type
+```{r}
+# Merge the data frames by rhopilema
+merged_data <- merge(seawater_bloom_blast_filt, themo_blast_filt, by = "rhopilema", all = TRUE) 
+
+merged_data <- merged_data %>%
+  mutate(Rhopilema_nomadica = rhopilema,
+         Percentage_Identity_Rhopilema_nomadica= 100)%>% 
+         select (-rhopilema)
+
+# Convert "rhopilema" column to numeric
+merged_data$rhopilema_numeric <- as.numeric(gsub("ASV(\\d+).*", "\\1", merged_data$Rhopilema_nomadica), na.rm = TRUE)
+
+rhopilema_seqs <- sub(":.*", "", merged_data$Rhopilema_nomadica[!is.na(merged_data$Rhopilema_nomadica)])
+themo_seqs <- sub(":.*", "", merged_data$Themo[!is.na(merged_data$Themo)])
+seawater_bloom_seqs <- sub(":.*", "", merged_data$Seawater_bloom[!is.na(merged_data$Seawater_bloom)])
+```
+
+# Transform all phyloseq to relative abundance
+```{r}
+rhopilema_ps_rel<- transform_sample_counts(rhopilema_ps,function(x) x / sum(x)*100)
+themo_ps_rel<- transform_sample_counts(themo_ps,function(x) x / sum(x)*100)
+seawater_bloom_ps_rel<- transform_sample_counts(seawater_bloom_ps,function(x) x / sum(x)*100)
+```
+
+# Prune all ASVs to contain only the shared ASVs
+```{r}
+rhopilema_ps_shared<-prune_taxa(rhopilema_seqs,rhopilema_ps_rel)
+themo_ps_shared<-prune_taxa(themo_seqs,themo_ps_rel)
+seawater_bloom_ps_shared<-prune_taxa(seawater_bloom_seqs,seawater_bloom_ps_rel)
+
+
+Rhopilema_nomadica<-psmelt(rhopilema_ps_shared) %>%
+  mutate(jellyfish_type = str_replace(jellyfish_type, " ", "_"))
+
+Themo <- psmelt(themo_ps_shared) %>% 
+         mutate(jellyfish_type = "Themo")
+
+Seawater_bloom <- psmelt(seawater_bloom_ps_shared)%>% 
+                  mutate(jellyfish_type = "Seawater_bloom")
+
+```
+# Create a distinct taxa df for each jellyfish. calculate mean and max of each taxa relative abundance
+```{r}
+jellyfish_list <- c("Rhopilema_nomadica","Themo","Seawater_bloom")
+
+for (obj_name in jellyfish_list) {
+  obj <- get(obj_name)  # Get the actual object using its name
+  
+  distinct_max <- obj %>% 
+    pivot_longer(c('OTU'),
+                 names_to = "level",
+                 values_to = "taxon") %>% 
+    group_by(taxon) %>% 
+    mutate(max = max(Abundance),
+           mean = mean(Abundance)) %>% 
+    distinct(jellyfish_type, Abundance, max, mean, taxon)
+  
+  distinct <- distinct_max %>%
+    distinct(taxon, .keep_all = TRUE)
+  
+  # Update the original object with the modified data
+  assign(paste0("distinct_",obj_name), distinct)
+}
+```
+
+# Create new object to pull the relative abundance into
+```{r}
+merged_data_abundance <- merged_data %>% 
+                         as_tibble() %>% 
+                         mutate(ASVs = Rhopilema_nomadica,
+                                rhopilema_numeric=as.numeric(rhopilema_numeric)) %>% 
+                         mutate_at(vars(-c(ASVs,rhopilema_numeric)), function(x) sub(":.*$", "", x)) %>% 
+                         mutate(ASVs = sub(":6", "", ASVs)) %>% 
+                         select(rhopilema_numeric,ASVs,everything())
+```
+
+# Loop over all jellyfish type, pull relative abundance for eace jellyfish type. 
+```{r}
+calculate_abundance <- function(data, jellyfish_list, value) {
+  for (i in jellyfish_list) {
+    jellyfish_df <- get(paste0("distinct_", i))
+    
+    # Convert the i column in data to character
+    data[[i]] <- as.character(data[[i]])
+    
+    joined_data <- left_join(data, jellyfish_df %>% select(taxon, !!value), by = setNames("taxon", i))
+    data <- joined_data %>%
+      mutate(!!sym(i) := ifelse(!is.na(!!sym(value)), !!sym(value), !!sym(i))) %>%
+      select(-!!value)
+  }
+  return(data)
+}
+
+# Calculate max and mean abundances
+merged_data_max_abundance <- calculate_abundance(merged_data_abundance, jellyfish_list, "max")
+merged_data_mean_abundance <- calculate_abundance(merged_data_abundance, jellyfish_list, "mean")
+```
+
+# Orginized merged_data_abundance to fit ggplot bubble plot
+```{r}
+# Function for further processing
+process_data <- function(data) {
+  data[, -c(1:2)] <- lapply(data[, -c(1:2)], as.numeric)
+  data <- data %>%
+    mutate_at(vars(-ASVs), ~ ifelse(str_detect(., "ASV"), NA, .)) %>% 
+    arrange(rhopilema_numeric) 
+  
+  data$ASVs <- sub(":1$", "", data$ASVs)
+  # Replace all NA values with "0"
+  data[is.na(data)] <- 0
+  # Separate the columns that start with "Percentage_Identity" and those that don't
+  cols <- names(data)
+  Percentage_Identity <- cols[startsWith(cols, "Percentage_Identity")]
+  other_cols <- cols[!startsWith(cols, "Percentage_Identity")]
+  # Combine them back in the desired order
+  new_order_cols <- c(other_cols, Percentage_Identity)
+  # Reorder the dataframe
+  data <- data[, new_order_cols]
+  return(data)
+}
+
+# Apply the function to both data frames
+merged_data_max_abundance <- process_data(merged_data_max_abundance)
+merged_data_mean_abundance <- process_data(merged_data_mean_abundance)
+
+# Species_col
+Species_col <- names(merged_data_mean_abundance)[3:5]
+```
+
+```{r}
+process_final_data <- function(data) {
+  # Reshape the data to a longer format
+  long_data <- merged_data_mean_abundance %>%
+    pivot_longer(
+      cols = Species_col,
+      names_to = "Species",
+      values_to = "Relative_abundance"
+    )
+
+  reshaped_data <- long_data %>%
+    pivot_longer(
+      cols = starts_with("Percentage_Identity_"),
+      names_to = "Percentage_Identity",
+      values_to = "Percentage"
+    ) %>%
+    mutate(Percentage_Identity = str_remove(Percentage_Identity, "Percentage_Identity_"))
+
+  # Define the breaks for the categories
+  breaks <- c(-Inf,97, 98, 99, 100, Inf)
+
+  # Define the labels for the categories
+  labels <- c("<97", "97", "98", "99", "100")
+
+  final_data <- reshaped_data %>%
+    filter(Relative_abundance != 0) %>% 
+    mutate(Percentage_correct = ifelse(Species == Percentage_Identity, Percentage, NA),
+           Percentage_correct = as.numeric(Percentage_correct),
+           log_Relative_abundance = log1p(Relative_abundance))
+
+ final_data <- final_data %>% 
+  mutate(
+    Percentage_Category = cut(final_data$Percentage_correct, breaks = breaks, labels = labels, right = FALSE),
+    Species = factor(Species, levels = c("Themo",
+                                         "Seawater_bloom",
+                                         "Rhopilema_nomadica")),
+    ASVs = factor(ASVs, levels = rev(unique(ASVs[order(rhopilema_numeric)])))) %>% 
+  group_by(ASVs, Species) %>%
+  fill(c(Percentage_correct), .direction = "downup") %>%
+  ungroup() %>% 
+  filter(Percentage_Category != '<97')%>%
+  select(rhopilema_numeric,ASVs,Species,Percentage_Identity,Relative_abundance, log_Relative_abundance,everything(),-Percentage) %>% 
+  distinct(ASVs, Species, .keep_all = TRUE)
+
+return(final_data)
+}
+# Apply the function to both data frames
+final_data_mean_abundance <- process_final_data(merged_data_mean_abundance)
+final_data_max_abundance <- process_final_data(merged_data_max_abundance)
+
+# Define the colors for the categories
+colors_jelly <- c("<97" = "darkgrey", "97" = "#d1bdde", "98" = "#af74d6",'99' = '#930CED',"100" = "#440154ff")
+break_size <- c(0.01,0.1,1, 10,20,30,47)
+```
+
+```{r}
+# Filter rows where Species is 'Rhopilema_nomadica'
+rhopilema_data <- final_data_mean_abundance %>%
+  filter(Species == "Rhopilema_nomadica")
+
+# Order the ASVs based on the relative abundance of Cassiopea_xamachana
+ordered_ASVs <- rhopilema_data %>%
+  arrange(Relative_abundance) %>%
+  pull(ASVs)
+
+
+# Create the bubble plot
+ggplot(final_data_mean_abundance, aes(y = factor(ASVs, levels = ordered_ASVs), x = Species, size = Relative_abundance, color = Percentage_Category)) +
+  # Add blue background for specific columns using annotate
+  annotate("rect", xmin = 0.5, xmax = 2.5, ymin = -Inf, ymax = Inf, fill = "lightblue", alpha = 0.5) +
+  # Add the original points
+  geom_point(alpha = 1) +
+  scale_size(range = c(1, 12), breaks = break_size) +
+  scale_color_manual(values = colors_jelly) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 410, hjust = 1, size = 9),
+        axis.text.y = element_text(size = 9),
+        legend.position = "right",
+        legend.title = element_text(size = 9)) +
+  guides(color = guide_legend(override.aes = list(size = 10))) +
+  labs(y = "Top ASVs R.nomadica")
+``` 
+
+

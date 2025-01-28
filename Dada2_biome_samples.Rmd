@@ -1,0 +1,212 @@
+---
+title: "Microbiome project"
+output: html_document
+---
+#### __Loading necessary analysis packages__ ####
+
+```{r setup, eval=TRUE, results='hide', message=FALSE}
+library(dada2)
+library(phyloseq)
+library(dplyr)
+library(tibble)
+library(gridExtra)
+library(readr)
+```
+
+#### __Set your working directory__ ####
+```{r echo=TRUE, eval=FALSE}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/")
+path <- ("./Raw_read_all")
+
+fnFs <- sort(list.files(path, pattern="_R1_", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_", full.names = TRUE)) 
+sample.names <- sapply(strsplit(basename(fnFs), "_R1_"),'[',1) 
+
+```
+#### __Set a new path__ ####
+Set a new path to where the trimed fastq file will be uploaded
+```{r echo=TRUE, eval=FALSE}
+filt_path <- file.path("Report")
+if(!file_test("-d", filt_path)) dir.create(filt_path)
+filtFs <- file.path(filt_path, paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(filt_path, paste0(sample.names, "_R_filt.fastq.gz"))
+head(filtRs)
+```
+
+#### quality check #### 
+```{r echo=TRUE, eval=FALSE}
+QualityProfileFs <- list()
+for(i in 1:length(fnFs)) {
+  QualityProfileFs[[i]] <- list()
+  QualityProfileFs[[i]][[1]] <- plotQualityProfile(fnFs[i])
+}
+pdf(file.path("Report","RawProfileForward.pdf"))
+for(i in 1:length(fnFs)) {
+  do.call("grid.arrange", QualityProfileFs[[i]])  
+}
+dev.off()
+rm(QualityProfileFs)
+
+QualityProfileRs <- list()
+for(i in 1:length(fnRs)) {
+  QualityProfileRs[[i]] <- list()
+  QualityProfileRs[[i]][[1]] <- plotQualityProfile(fnRs[i])
+}
+pdf(file.path("Report","RawProfileReverse.pdf"))
+for(i in 1:length(fnRs)) {
+  do.call("grid.arrange", QualityProfileRs[[i]])  
+}
+dev.off()
+rm(QualityProfileRs)
+```
+
+
+#### __Assign filtering parameters__ ####
+
+* fnFs= The path of the input forward fastqfile
+* filtFs= the path of the output filtered fasqfile corresponding the fwd input
+* fnRs= the path of the input reverse fastqfile
+* filtRs= the path of the output filtered fasqfile corresponding the rev input
+* truncLen c[F, R]= Truncates (cut off) read at a specific base How to asses it?
+	How much overlap do we need? 
+* maxN= The max number of ambiguous bases allowed. However, for now DADA2 do not allow Ns, so keep it at 0
+* maxEE= c(F, R)
+The maximum number of estimated errors allowed for an individual read.How good are your quality scores? If it’s good, keep low. If not so great…, then raise it.
+* truncQ= truncates reads at the first instance of a quality score ≤ to the value specified. Actually, a relic to when illumine machines used to add Q=2 at start and end of sequences.
+* rm.phix= removes reads identified as belonging to the phiX phage added as positive control to all samples run in Illumina instruments. Usually removed by sequencer, but, leave it there just in case.
+
+
+```{r echo=TRUE, eval=FALSE}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(260,220),
+                     maxN=0, maxEE=c(2,3), truncQ=2, rm.phix=TRUE, trimLeft=c(17,21),
+                     compress=TRUE, multithread=F)
+out
+```
+#### I removed s45 s49,s104,s241 and s263 as they were left with 0 read after trimming ###
+
+#### __Let dada learn the error rates__ ####
+The DADA2 algorithm makes use of a parametric error model (err) and every amplicon dataset has a different set of error rates. The __learnErrors__ method learns this error model from the data, by alternating estimation of the error rates and inference of sample composition until they converge on a jointly consistent solution. As in many machine-learning problems, the algorithm must begin with an initial guess, for which the maximum possible error rates in this data are used (the error rates if only the most abundant sequence is correct and all the rest are errors).
+
+* MAX_CONSIST put on at least 20
+
+```{r echo=TRUE, eval=FALSE}
+errF <- learnErrors(filtFs, multithread=TRUE, MAX_CONSIST=20, verbose=TRUE, randomize=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE, MAX_CONSIST=20, verbose=TRUE, randomize=TRUE)
+```  
+
+
+```{r eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+memory.limit(size=25000)
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+```
+
+```{r eval=FALSE, echo=TRUE, message=FALSE, warning=FALSE}
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+```
+
+```{r echo=TRUE, eval=FALSE}
+dadaFs <- dada(derepFs, errF, multithread=TRUE)
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+dadaFs[1]
+```
+# Create a QC and save it to report file
+```{r echo=TRUE, eval=FALSE}
+# quality check
+QualityProfileFs <- list()
+for(i in 1:length(filtFs)) {
+  QualityProfileFs[[i]] <- list()
+  QualityProfileFs[[i]][[1]] <- plotQualityProfile(filtFs[i])
+}
+pdf(file.path("Report","FiltProfileForward.pdf"))
+for(i in 1:length(filtFs)) {
+  do.call("grid.arrange", QualityProfileFs[[i]])  
+}
+dev.off()
+rm(QualityProfileFs)
+
+QualityProfileRs <- list()
+for(i in 1:length(filtRs)) {
+  QualityProfileRs[[i]] <- list()
+  QualityProfileRs[[i]][[1]] <- plotQualityProfile(filtRs[i])
+}
+pdf(file.path("Report","FiltProfileReverse.pdf"))
+for(i in 1:length(filtRs)) {
+  do.call("grid.arrange", QualityProfileRs[[i]])  
+}
+dev.off()
+rm(QualityProfileRs)
+```
+
+
+```{r echo=TRUE}
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE,minOverlap = 12)
+head(mergers[[1]])
+```
+#### __Create an ASV table__ ####
+
+
+```{r echo=TRUE, eval=FALSE}
+seqtab_biome <- makeSequenceTable(mergers)
+dim(seqtab_biome)
+table(nchar(getSequences(seqtab_biome)))
+```
+
+#### __remove chimeras__ ####
+* calculation of the abundance as a proportion of the sequences that were after chimera removel
+* Inspect distribution of sequence length
+```{r echo=TRUE, eval=FALSE}
+seqtab.nochim_biome  <- removeBimeraDenovo(seqtab_biome, method="consensus", multithread=TRUE, verbose=TRUE)
+sum(seqtab.nochim_biome/sum(seqtab_biome))
+table(nchar(getSequences(seqtab.nochim_biome)))
+```
+
+# inspect output: remove singletons and 'junk' sequences
+# read lengths modified for V3V4 amplicons / based upon output table where majority of reads occurs
+```{r echo=TRUE, eval=FALSE}
+seqtab.nochim_biome_2 <- seqtab.nochim_biome[, nchar(colnames(seqtab.nochim_biome)) %in% c(395:435) & colSums(seqtab.nochim_biome) > 1]
+dim(seqtab.nochim_biome_2)
+summary(rowSums(seqtab.nochim_biome_2)/rowSums(seqtab.nochim_biome))
+```
+#### __Summarizing the work flow in one table__ ####
+
+```{r echo=TRUE, eval=FALSE}
+getN <- function(x) sum(getUniques(x))
+track_biome <- as_tibble(out) %>%
+  mutate(denoisedF = sapply(dadaFs, getN),
+         denoisedR = sapply(dadaRs, getN),
+         merged = sapply(mergers, getN),
+         nonchim = rowSums(seqtab.nochim_biome),
+         Final_reads = rowSums(seqtab.nochim_biome_2),
+        Survival = (Final_reads/reads.in)*100) %>%
+  `row.names<-`(sample.names)
+
+write.csv(track_biome,'./Track_jen.csv')
+saveRDS(track_biome,'./Track_jen.rds')
+```
+
+#### __Assign taxonomy__ ####
+#Silva
+
+```{r echo=TRUE, eval=FALSE}
+taxa_biome<- assignTaxonomy(seqtab.nochim_biome_2, "C:/Users/barak/OneDrive - University of Haifa/Noga Phd/Jellyfish_research/16s_analysis/Database/silva_nr99_v138.1_train_set.fa.gz", multithread=TRUE)
+taxa_biome<- addSpecies(taxa_biome, "C:/Users/barak/OneDrive - University of Haifa/Noga Phd/Jellyfish_research/16s_analysis/Database/silva_species_assignment_v138.1.fa.gz") #assign species
+```
+
+#### __get a readable tabulated format of the analysis for SILVA ####
+
+```{r echo=TRUE, eval=FALSE}
+write.csv(t(seqtab.nochim_biome_2),"./ASV_jen.csv", quote = F)
+write.csv(taxa_biome, file.path("./Taxonomy_jen.csv"), quote = F)
+dataps_biome=cbind(as.data.frame(t(seqtab.nochim_biome_2)), as.data.frame(taxa_biome))
+names(dataps_biome) <- gsub("-", "_", names(dataps_biome))
+write.csv(dataps_biome,"./Taxonoy_jen.csv")
+
+```
+
+# Save workspace for later use
+```{r echo=TRUE, eval=FALSE}
+save.image("jen_dada2.Rdata")
+```
+

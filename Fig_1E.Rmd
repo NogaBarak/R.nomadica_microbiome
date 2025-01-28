@@ -1,0 +1,91 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+# Load the libraries
+library(ggplot2)
+library(ggmap)
+library(tmaptools)
+library(ggrepel)
+library(dplyr)
+library(tidyverse)
+library(ggpubr)
+library(ggspatial)
+```
+
+#load phyloseq object to extract metadata
+```{r}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/processed_data")
+
+# Load phyloseq 
+biome_phyloseq<-readRDS("./bloom_phyloseq")
+sample_data(biome_phyloseq)$Tissue_type <- ifelse(grepl("Bw", sample_data(biome_phyloseq)$Sample_name), "Bell wounded", sample_data(biome_phyloseq)$Tissue_type)
+taxa_names(biome_phyloseq) <- paste0("ASV", seq(ntaxa(biome_phyloseq))) 
+
+#Only jellyfish samples
+phy_jelly <- biome_phyloseq %>% 
+                          subset_samples(.,Tissue_type %in% c("Bell","Tentacles","GVC","Gonads")&
+                                           !Year %in% "2019")
+
+# Extract metadata
+metadata <- sample_data(phy_jelly) %>% 
+           data.frame() %>% 
+           dplyr::select(Sampling_date, Size, Jellyfish_number, Gender, Health_condition) %>% 
+           distinct() %>% 
+           mutate(Size=as.numeric(Size))
+
+```
+
+# Create a graph for all sampled jellyfish
+```{r}
+# Ensure Jellyfish_number is a factor with explicitly defined levels
+metadata$Jellyfish_index <- as.numeric(factor(metadata$Jellyfish_number, 
+                                              levels = c('16','17','18','19','20','23','24','25','26','27',
+                                                         '28','32','33','34','35','36','37','38','44','45',
+                                                         '46','47','48','49','50','51','52','53','54','55',
+                                                         '56','57')))
+
+# Check the range of Jellyfish_index to ensure it starts from 1
+range(metadata$Jellyfish_index, na.rm = TRUE)  # This should return 1 to 32
+
+# Plot using Jellyfish_index instead of Jellyfish_number
+p <- ggplot(metadata, aes(x = Jellyfish_index, y = Size)) +
+  geom_point(aes(color = Gender, shape = Health_condition), size = 3, width = 0.5) +
+  scale_shape_manual(values = c(16, 21)) + # Change the shapes as needed
+  theme_classic() +
+  theme(text = element_text(size = 10),
+        axis.text.x = element_text(size = 10, angle = 90, vjust = 0.5, hjust = 1), # Adjust angle for better readability
+        axis.text.y = element_text(size = 10),
+        legend.position = "bottom",
+        legend.text = element_text(size = 12)) +
+  labs(x = "Jellyfish Index", y = "Size", color = "Gender", shape = "Health Condition") +
+  scale_y_continuous(n.breaks = 10) +
+  scale_x_continuous(breaks = 1:max(metadata$Jellyfish_index))+
+  scale_color_manual(values = c('Male'="blue",'Female'="maroon"))
+
+# Specify specific positions for the date lines on the x-axis
+date_lines <- c(5.5, 11.5, 18.5, 27.5, 32.5)  # These are the x-axis positions for the lines
+dates <- c("05/02/2020", "17/06/2020", "24/06/2020", "19/07/2020", "15/02/2021")
+
+# Add vertical lines and text for each specified position
+for (i in seq_along(date_lines)) {
+  p <- p + 
+    geom_vline(xintercept = date_lines[i], linetype = "dashed", color = "grey50") +
+    annotate("text", x = date_lines[i], y = 65, 
+             label = as.character(dates[i]), angle = 90, vjust = -0.5, size = 4)
+}
+
+# Print the plot
+print(p)
+```
+
+
+```{r}
+ggsave("./meta.pdf", plot = p, 
+       width = 135, height = 100, units = "mm", 
+       device = cairo_pdf)
+```
+
+

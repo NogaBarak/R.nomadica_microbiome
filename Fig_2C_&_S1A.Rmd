@@ -1,0 +1,305 @@
+---
+title: "variation partition analysis"
+output: html_notebook
+---
+
+```{r}
+library(vegan)
+library(phyloseq)
+library(dplyr)
+library(microbiomer)
+library(combi)
+library(tidyverse)
+library(glue)
+```
+
+#Upload phyloseq and subset the data for bray test
+```{r include=FALSE}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/processed_data")
+
+# Load phyloseq object WITH CSS
+biome_phyloseq<-readRDS("./bloom_phyloseq")
+sample_data(biome_phyloseq)$Tissue_type <- ifelse(grepl("Bw", sample_data(biome_phyloseq)$Sample_name), "Bell wounded", sample_data(biome_phyloseq)$Tissue_type)
+
+taxa_names(biome_phyloseq) <- paste0("ASV", seq(ntaxa(biome_phyloseq)))
+
+# All samples without controls 
+phy_jelly<- biome_phyloseq %>%
+                          subset_samples(.,Tissue_type %in% 
+                                    c("Bell",
+                                      "Tentacles",
+                                      "GVC",
+                                      "Gonads"))%>%  
+                          pres_abund_filter(., pres = 2,abund =0, verbose = TRUE) 
+
+phy_jelly_no_19 <-phy_jelly %>%
+                          subset_samples(.,
+                                         Year!="2019") %>% 
+                          pres_abund_filter(., pres = 2,abund =0, verbose = TRUE) %>% 
+                          subset_samples(!Sample_name %in% c("54B","26V")) 
+```
+# Filter otu table to specific number of reads
+```{r}
+otu_table_filt <- otu_table(phy_jelly_no_19) %>% 
+    t() %>%  
+    as.data.frame() %>% 
+    mutate(Sample = row.names(.)) %>%
+    pivot_longer(-Sample) %>% 
+    group_by(Sample)  %>%
+    mutate(total = sum(value)) %>%
+    filter(total > 14000) %>%
+    group_by(name) %>%
+    mutate(total = sum(value)) %>%
+    filter(total > 99) %>%
+    ungroup() %>%
+    select(-total) %>%
+    pivot_wider(names_from = Sample, values_from = value) %>% 
+    column_to_rownames(var = "name")
+
+otu_table(phy_jelly_no_19) <- otu_table(otu_table_filt, taxa_are_rows = T)
+
+
+asv_taxa_meta<-tax_table(phy_jelly_no_19) %>% 
+         as.data.frame() %>% 
+         rownames_to_column(var = "OTU") %>% 
+         mutate(Genus_ASV= glue("{OTU} ({Genus})"))%>% 
+         column_to_rownames(var = "OTU") %>% 
+         taxtab() 
+        
+col<-c("Domain", "Phylum" ,"Class" , "Order"  ,"Family" ,"Genus",'Genus_ASV') 
+row<-taxa_names(phy_jelly_no_19)
+
+taxa_names(asv_taxa_meta)<-row
+colnames(asv_taxa_meta@.Data)<-col
+
+tax_table(phy_jelly_no_19)<-asv_taxa_meta 
+```
+
+
+```{r}
+set.seed(220389)
+
+metadata<- sample_data(phy_jelly_no_19) %>% 
+           as_tibble(.) %>% 
+           mutate(size_range= case_when(Size <= 21 ~ "0-20",
+                                      Size >21 & Size <= 30 ~ "20-30",
+                                      Size >30 & Size <= 40 ~ "30-40",
+                                      Size >40 & Size <= 49 ~ "40-50",
+                                      Size >49 ~ "50-70"))
+
+otu_table<- otu_table(phy_jelly_no_19) %>% 
+                       t() %>%  
+                       as.data.frame () %>% 
+                       mutate(Sample=metadata$Sample_name) %>%
+                       pivot_longer(-Sample)
+
+count_table<-otu_table%>%
+            group_by(name) %>%
+            mutate(total = sum(value)) %>%
+            filter(total >99) %>% # only ASVs with sum of over 99
+            ungroup() %>%
+            select(-total) %>%
+            select(Sample,value) %>% 
+            group_by(Sample) %>%
+            summarize(total = sum(value)) %>%
+            arrange(total)
+
+shared<- otu_table %>%
+            group_by(name) %>%
+            mutate(total = sum(value)) %>%
+            filter(total >99) %>% # only ASVs with sum of over 99
+            ungroup() %>%
+            select(-total) %>%
+            pivot_wider(Sample) %>%
+            as.data.frame()
+
+
+rownames(shared)<-shared$Sample
+
+shared_matrix<-shared %>% 
+        .[,-1] %>% 
+        as.matrix(.)
+
+dist_all<-avgdist(shared_matrix, dmethod="bray", sample=14600,iterations=100)
+
+mod <- varpart(dist_all,~Tissue_type,~Month,~Size_range,~Gender,data=metadata)
+
+mod
+
+# Perform RDA
+rda_mod <- rda(shared_matrix ~ Tissue_type + Month + Gender + Size_range, data = metadata)
+
+# Perform ANOVA to test significance
+anova_mod <- anova.cca(rda_mod, by = "margin", permutations = 999)
+print(anova_mod)
+
+
+# plot the variation partitioning Venn diagram
+plot(mod,
+     Xnames = c("Tissue type", "Month","Size range","Gender"), # name the partitions
+     bg = c("gold","mediumpurple", "maroon","lightblue"), 
+     alpha = 80, # colour the circles
+     digits = 1, # only show 2 digits
+     cex = 0.7)
+```
+#Save to PDF
+```{r}
+pdf(file = "VPA_all_tissues.pdf",   
+    width = 5, 
+    height = 5) 
+
+# plot the variation partitioning Venn diagram
+p<-plot(mod,
+     Xnames = c("Tissue type", "Month","Size range","Gender"), # name the partitions
+     bg = c("gold","mediumpurple", "maroon","lightblue"), 
+     alpha = 80, # colour the circles
+     digits = 1, # only show 2 digits
+     cex = 0.7)
+dev.off()
+```
+# Check VPA in different tissue types
+```{r}
+set.seed(220389)
+
+# Create a list of file paths for the phyloseq objects
+tissue_type <- c("Bell","Tentacles","GVC","Gonads")
+results<-list()
+
+# Loop over the file paths
+for (i in tissue_type) {
+  phy_obj <- subset_samples(phy_jelly_no_19,Tissue_type==i)
+
+  meta<- sample_data(phy_obj) %>% 
+           as_tibble(.)%>% 
+           mutate(size_range= case_when(Size <= 21 ~ "0-20",
+                                      Size >21 & Size <= 30 ~ "20-30",
+                                      Size >30 & Size <= 40 ~ "30-40",
+                                      Size >40 & Size <= 49 ~ "40-50",
+                                      Size >49 ~ "50-70"))
+   
+  otu<- otu_table(phy_obj) %>% 
+                       t() %>%  
+                       as.data.frame () %>% 
+                       mutate(Sample=meta$Sample_name) %>%
+                       pivot_longer(-Sample)
+
+  shared_tissue<- otu %>% 
+              pivot_wider(Sample) %>%
+              as.data.frame()
+
+  rownames(shared_tissue)<-shared_tissue$Sample
+
+  matrix<-shared_tissue %>% 
+        .[,-1] %>% 
+        as.matrix(.)
+  
+  # Calculate Bray-Curtis dissimilarity matrix
+  distance_matrix <- avgdist(matrix, dmethod="bray", sample=14600,iterations =100)
+
+  # Merge metadata with NMDS coordinates
+  VPA<- varpart(distance_matrix,~Month,~Gender,~Size_range,data=meta)
+  
+  stat_i<-anova.cca(rda(matrix~ Month+Gender+Size_range, data=meta),
+          by="term",
+          permutations = how(nperm=999))
+  results[[i]] <- stat_i
+
+  # Save the plot to a PDF file
+  pdf(paste0(i, ".pdf"))
+  plot(VPA,
+     Xnames = c( "Month","Gender","Size range","Health condition"),
+     bg = c("mediumpurple", "maroon","lightblue"), 
+     alpha = 80, # colour the circles
+     digits = 1, # only show 2 digits
+     cex = 1)+
+     title(i)
+  dev.off()
+}
+
+```
+```{r}
+pdf(file = "VPA_tissues.pdf",   
+    width = 5, 
+    height = 5) 
+
+# plot the variation partitioning Venn diagram
+plot(VPA,
+     Xnames = c( "Month","Gender","Size range","Health condition"),
+     bg = c("mediumpurple", "maroon","lightblue"), 
+     alpha = 80, # colour the circles
+     digits = 2, # only show 2 digits
+     cex = 1)+
+     title(i)
+
+dev.off()
+```
+
+
+# Stat all
+```{r}
+anova.cca(otu_phy ~ Tissue_type+Month+Gender+Size_range, data = mod)
+
+meta<- subset(meta, select = c(Tissue_type,Month,Gender,Size_range))
+
+#Which fractions can we test?
+out <- varpart(distance_matrix_all, ~Tissue_type,~Month,~Gender,~Size_range, data=meta)
+out #The only one we can't test is [b]
+
+otu_phy<-t(otu_table(phy_jelly))%>%
+    as.data.frame() %>%
+    mutate(Sample_ID = row.names(.))
+
+
+otu_phy<-as.matrix(phy_jelly@otu_table)
+otu_phy<-as.data.frame(t(otu_phy))
+
+# RDA of full model, gives us the fractions of [a+b+c]
+jelly.rda <- rda(otu_phy ~ Tissue_type+Month+Gender+Size_range, data = meta)
+
+# Marginal effect of MAT: fractions [a+b]
+rda.Tissue <- rda(otu_phy ~ Tissue_type, data = meta)
+# Marginal effect of MCMT: fractions [b+c]
+rda.Month <- rda(otu_phy ~ Month, data = meta)
+# Partial effect of MAT [a]
+rda.Gender <- rda(otu_phy ~ Gender, data = meta)
+# Partial effect of MCMT [c]
+rda.Size_range <- rda(otu_phy ~ Size_range, data = meta)
+
+anova.cca(jelly.rda) #[a+b+c]
+anova.cca(rda.Tissue) #[a+b]
+anova.cca(rda.Month) #[b+c]
+anova.cca(rda.Gender) #[a]
+anova.cca(rda.Size_range) #[c]
+```
+#Stat Tissue
+```{r}
+meta<- subset(meta, select = c(Month,Gender,Size_range))
+
+#Which fractions can we test?
+out <- varpart(distance_matrix,~Month,~Gender,~Size_range, data=meta)
+out #The only one we can't test is [b]
+
+otu_phy<-t(otu_table(phy_jelly_no_19))%>%
+    as.data.frame() %>%
+    mutate(Sample_ID = row.names(.))
+
+
+# RDA of full model, gives us the fractions of [a+b+c]
+jelly.rda <- rda(otu_phy ~Month+Gender+Size_range, data = meta)
+
+# Marginal effect of MAT: fractions [a+b]
+rda.Tissue <- rda(otu_phy ~ Tissue_type, data = meta)
+# Marginal effect of MCMT: fractions [b+c]
+rda.Month <- rda(otu_phy ~ Month, data = meta)
+# Partial effect of MAT [a]
+rda.Gender <- rda(otu_phy ~ Gender, data = meta)
+# Partial effect of MCMT [c]
+rda.Size_range <- rda(otu_phy ~ Size_range, data = meta)
+
+anova.cca(jelly.rda) #[a+b+c]
+anova.cca(rda.Tissue) #[a+b]
+anova.cca(rda.Month) #[b+c]
+anova.cca(rda.Gender) #[a]
+anova.cca(rda.Size_range) #[c]
+```
+

@@ -1,0 +1,155 @@
+---
+title: "Fig_3B"
+output: html_notebook
+---
+```{r}
+library(tidyverse)
+library(broom)
+library(ggtext)
+library(microbiomer)
+library(glue)
+library(multcompView)
+library(phyloseq)
+library(ARTool)
+```
+```{r}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/")
+
+# Load phyloseq object WITH CSS
+biome_phyloseq<-readRDS("./processed_data/bloom_phyloseq")
+sample_data(biome_phyloseq)$Tissue_type <- ifelse(grepl("Bw", sample_data(biome_phyloseq)$Sample_name), "Bell wounded", sample_data(biome_phyloseq)$Tissue_type)
+
+taxa_names(biome_phyloseq) <- paste0("ASV", seq(ntaxa(biome_phyloseq)))
+
+# All samples without controls 
+phy_jelly<- biome_phyloseq %>%
+                          subset_samples(.,Tissue_type %in% 
+                                    c("Bell",
+                                      "Tentacles",
+                                      "GVC",
+                                      "Gonads") &
+                                      Year!="2019") %>% 
+                   prune_taxa(taxa_sums(.) > 99, .) %>% 
+                   prune_samples(sample_sums(.) > 14000, .)%>%  
+                   pres_abund_filter(., pres = 2,abund =0, verbose = TRUE) 
+```
+
+```{r}
+asv_taxa_meta<-tax_table(phy_jelly) %>% 
+         as.data.frame() %>% 
+         rownames_to_column(var = "OTU") %>% 
+         mutate(Genus_ASV= glue("{OTU} ({Genus})"))%>% 
+         column_to_rownames(var = "OTU") %>% 
+         tax_table() 
+        
+col<-c("Domain", "Phylum" ,"Class" , "Order"  ,"Family" ,"Genus",'Genus_ASV') 
+row<-taxa_names(phy_jelly)
+
+taxa_names(asv_taxa_meta)<-row
+colnames(asv_taxa_meta@.Data)<-col
+
+tax_table(phy_jelly)<-asv_taxa_meta 
+```
+
+```{r}
+metadata<- sample_data(phy_jelly) %>% 
+           as_tibble(.) %>% 
+           select(Sample_name,Tissue_type)%>% 
+           dplyr::rename(Group=Sample_name)  
+
+
+shared <- otu_table (phy_jelly)%>%
+          t() %>% 
+          as.data.frame () %>% 
+          mutate(numOtus=length(colnames(.)),
+                 Group= metadata$Group) %>% 
+          select(Group, starts_with("ASV")) %>%
+          pivot_longer(-Group, names_to="ASV", values_to="count")
+
+taxonomy <- tax_table(phy_jelly) %>% 
+          as.data.frame () %>%
+          mutate(ASV= rownames(.))
+
+composite <- inner_join(taxonomy,shared, by="ASV") %>%
+  group_by(Group, Genus_ASV) %>%
+  summarize(count = sum(count), .groups="drop") %>%
+  group_by(Group) %>%
+  mutate(rel_abund = 100*(count / sum(count))) %>%
+  ungroup() %>%
+  select(-count) %>%
+  inner_join(., metadata, by="Group")
+
+
+genus_pool <- composite %>%
+  group_by(Tissue_type, Genus_ASV) %>%
+  summarize(median=median(rel_abund), .groups="drop") %>%
+  group_by(Genus_ASV) %>%
+  summarize(pool = max(median) <3,
+            median = max(median),
+            .groups="drop")
+
+composite_rel_mini <- inner_join(composite, genus_pool, by="Genus_ASV") %>%
+  mutate(Genus_ASV = if_else(pool, "Other", as.character(Genus_ASV))) %>%
+  group_by(Group, Tissue_type, Genus_ASV) %>% 
+  select(Group, Tissue_type, Genus_ASV,rel_abund) %>% 
+  filter(Genus_ASV != "Other") %>% 
+  mutate (Tissue_type = as.factor(Tissue_type),
+          Genus_ASV = as.factor(Genus_ASV),
+          Jellyfish_number = as.factor(str_extract(Group, "\\d+"))) %>% 
+  data.frame()
+```
+
+In this part I want to preform Kruskal-Wallis test and the pairwise Wilcoxon test for each tissue type in order to conclude what are the significantly taxa in every season./ 
+Since I saw different community distribution in different tissues and months, for now I will treat them as separate niches, and will try to characterize each tissue by it self./ 
+based on the results I could focus on the main taxa that are relevant for all or focus on the unique taxa of each tissue.
+
+#Kruskal-Wallis and pairwise Wilcoxon tests
+```{r}
+sig_genera<- composite_rel_mini %>%
+  group_by(Genus_ASV) %>%
+  nest() %>%
+  mutate(experiment_tests = map(.x=data,
+                                ~kruskal.test(rel_abund~Tissue_type, data=.x,) %>%
+                                  tidy())) %>%
+  unnest(experiment_tests) %>%
+  mutate(p.experiment = p.adjust(p.value, method="BH")) %>%
+  select(Genus_ASV, data, p.experiment)%>%
+  filter(p.experiment < 0.05)
+
+
+pairwise_sig_genera <- sig_genera %>%
+  mutate(pairwise_tests = map(data, ~pairwise.wilcox.test(x=.x$rel_abund,
+                                                          g=.x$Tissue_type,
+                                                          p.adjust.method = "BH",
+                                                          exact = F) %>%
+                                tidy())) %>%
+  unnest(pairwise_tests) %>%
+  filter(p.value < 0.05)
+
+Tissue_color = c("Bell"="#0E4CAA","GVC"="green","Gonads"="purple", "Rhopalium"="orange","Tentacles"="gold4","Sea water"="deepskyblue3")
+ 
+tissue_sgnifi_no_19<-ggplot(composite_rel_mini,aes(x=rel_abund,  y=fct_rev(Genus_ASV), color=Tissue_type, fill=Tissue_type))+
+  geom_jitter(position = position_jitterdodge(dodge.width = 0.9,
+                                              jitter.width = 0.2),
+                                              size=2,
+                                              shape=19,
+                                              alpha=0.7) +
+  stat_summary(fun.data = median_hilow, fun.args = list(conf.int=0.5),
+               geom="pointrange",
+               position = position_dodge(width=0.9),
+               color="black", show.legend = FALSE)+
+  coord_trans(x="log10")  +                          # Create the plot with log10 scale This can be good to show the low abundance taxa!
+           scale_x_continuous(limits=c(0.01, 100),
+                              breaks=c(0,0.1, 1, 10, 100),
+                              labels=c(0,0.1, 1, 10, 100)) +
+  scale_color_manual(values=Tissue_color) +
+  scale_fill_manual(values=Tissue_color) +
+  labs(x= "Relative abundance (%)", y=NULL)+
+    theme_classic()
+```
+
+```{r}
+ggsave("./Tissue_Abundance_signif.pdf", plot = tissue_sgnifi_no_19, width = 6, height = 6)
+
+```
+

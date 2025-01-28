@@ -1,0 +1,428 @@
+---
+title: "Alpha diversity"
+output: html_notebook
+---
+```{r message=FALSE, warning=FALSE}
+library(miaViz)
+library(vegan)
+library(ggplot2)
+library(dplyr)
+library(ARTool)
+library(scater)
+library(microbiomer)
+library(tidyverse)
+library(glue)
+library(dplyr)
+```
+
+```{r message=FALSE}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/")
+
+# Load phyloseq object WITH CSS
+biome_phyloseq<-readRDS("./bloom_phyloseq")
+sample_data(biome_phyloseq)$Tissue_type <- ifelse(grepl("Bw", sample_data(biome_phyloseq)$Sample_name), "Bell wounded", sample_data(biome_phyloseq)$Tissue_type)
+
+taxa_names(biome_phyloseq) <- paste0("ASV", seq(ntaxa(biome_phyloseq)))
+
+# Subset data to only jellyfish tissues, exclude 2019, ASVs that are in at least 2 samples
+phy_jelly<- biome_phyloseq %>%
+                          subset_samples(.,Tissue_type %in% 
+                                    c("Bell",
+                                      "Tentacles",
+                                      "GVC",
+                                      "Gonads",
+                                      "Sea water")&
+                                       Year!="2019") %>%  
+                     prune_samples(sample_sums(.) > 10000, .)
+                     pres_abund_filter(., pres = 2,abund =0, verbose = TRUE) %>% 
+  
+```
+
+
+```{r message=FALSE}
+# Creating a new OTU table with total read over 14600, total specific ASVs reads over 99.
+otu_table_filt <- otu_table(phy_jelly) %>% 
+    t() %>%  
+    as.data.frame() %>% 
+    mutate(Sample = row.names(.)) %>%
+    pivot_longer(-Sample) %>% 
+    group_by(Sample)  %>%
+    mutate(total = sum(value)) %>%
+    filter(total > 14000) %>%
+    group_by(name) %>%
+    mutate(total = sum(value)) %>%
+    filter(total > 99) %>%
+    ungroup() %>%
+    select(-total) %>%
+    pivot_wider(names_from = Sample, values_from = value) %>% 
+    column_to_rownames(var = "name")
+
+otu_table(phy_jelly) <- otu_table(otu_table_filt, taxa_are_rows = T)
+
+# Adding a column into the OTU table containing ASV_Genus column (useful in ASV graphic analysis)
+asv_taxa_meta<-tax_table(phy_jelly) %>% 
+         as.data.frame() %>% 
+         rownames_to_column(var = "OTU") %>% 
+         mutate(ASV_Genus = glue("{OTU} ({Genus})"))%>% 
+         column_to_rownames(var = "OTU") %>% 
+         taxtab() 
+        
+col<-c("Kingdom", "Phylum" ,"Class" , "Order"  ,"Family" ,"Genus",'ASV_Genus') 
+row<-taxa_names(phy_jelly)
+
+taxa_names(asv_taxa_meta)<-row
+colnames(asv_taxa_meta@.Data)<-col
+
+tax_table(phy_jelly)<-asv_taxa_meta  
+
+# After filtration i have a total of 480 ASVs in all samples
+```
+
+#Number of reads visualization
+```{r}
+#Turn phyloseq to tse
+tse<-makeTreeSummarizedExperimentFromPhyloseq(phy_jelly)
+
+perCellQCMetrics(tse)
+tse <- addPerCellQC(tse)
+colData(tse)$total
+
+p<-plotColData(tse,
+                "sum","Tissue_type",
+                colour_by = "Tissue_type") + 
+    scale_color_manual(values = colors)+
+    theme_classic()
+```
+
+# Alpha diversity analysis
+```{r}
+# Set threshold of 14500 reads
+data <- assays(tse)[[1]]
+reads <- rowSums(data)
+
+# Initialize data frames to store results
+shannon_df <- data.frame()
+inverse_simpson_df <- data.frame()
+observed_df <- data.frame()
+
+# Loop 1000 times
+for (i in 1:1000) {
+    # Subset samples based on smallest sample 
+    count <- data.frame(colSums(assays(tse)[[1]]), row.names = rownames(colData(tse)))
+    tse_alpha <- subsampleCounts(tse, min_size = min(count), replace = TRUE, seed=220389)
+
+    tse_alpha <- estimateDiversity(tse_alpha, 
+                              abund_values = "counts",
+                             index = c("shannon"),
+                             name= c("shannon"))
+
+    tse_alpha <- estimateDiversity(tse_alpha, 
+                              abund_values = "counts",
+                             index = c("inverse_simpson"),
+                             name= c("inverse_simpson"))
+    
+    # Store results in data frames
+    shannon_df_temp <- tse_alpha@colData$shannon %>% 
+            as_data_frame()  %>% 
+            mutate(sample=(sample_data(phy_jelly)$Sample_name),
+                   run_num=i) %>% 
+            dplyr::rename(.,shannon=value)
+    
+    shannon_df <- rbind(shannon_df, shannon_df_temp)
+            
+    inverse_simpson_df_temp <- tse_alpha@colData$inverse_simpson %>% 
+              as_data_frame() %>% 
+              mutate(sample=(sample_data(phy_jelly)$Sample_name),
+                            run_num=i)%>% 
+            dplyr::rename(.,inverse_simpson=value)
+    
+    inverse_simpson_df <- rbind(inverse_simpson_df, inverse_simpson_df_temp)
+              
+}
+```
+
+```{r}
+save.image('./Alpha/Seawater_tissues_alpha.RData')
+```
+
+```{r}
+tse_alpha<- estimateRichness(tse_alpha, 
+                       abund_values = "counts",
+                       index = "observed",
+                       name="observed")
+
+observed<-tse_alpha@colData$observed%>% 
+              as_data_frame() %>% 
+              mutate(sample=(sample_data(phy_jelly)$Sample_name),
+                     Tissue_type=sample_data(phy_jelly)$Tissue_type,
+                     Month=sample_data(phy_jelly)$Month,
+                     Health_condition=sample_data(phy_jelly)$Health_condition,
+                     Date=sample_data(phy_jelly)$Sampling_date,
+                     Size =sample_data(phy_jelly)$Size)%>% 
+               dplyr::rename(.,observed=value) 
+
+mean_df<- dplyr::inner_join(inverse_simpson_df,shannon_df) %>%  
+          group_by(sample) %>% 
+                 summarize(inverse_simpson_avg=mean(inverse_simpson),
+                        shannon_avg=mean(shannon)) %>% 
+                 select(sample,shannon_avg,inverse_simpson_avg) %>% 
+          dplyr::inner_join(observed)%>% 
+                 mutate(Tissue_type=factor(Tissue_type),
+                        sample=factor(sample),
+                        Month=factor(Month),
+                        Date= factor(Date),
+                        Month=fct_relevel(Month,"Feb","Jun","Jul"),
+                        Health_condition=factor(Health_condition),
+                        Subgroup= case_when(
+                              grepl("w",sample)~ "Unhealthy bell",
+                              grepl("u",sample)~ "Unhealthy bell",
+                              grepl("Sm",sample)~ "Unhealthy bell",
+                                    TRUE ~ "Healthy bell"),
+                        Jellyfish_number = as.numeric(str_extract(mean_df$sample, "\\d+")))
+                        
+           
+# Group by Tissue_type
+summary_tissue <- mean_df %>%
+  group_by(Tissue_type) %>%
+  summarise(
+    shannon_avg_mean = mean(shannon_avg, na.rm = TRUE),
+    shannon_avg_median = median(shannon_avg, na.rm = TRUE),
+    inverse_simpson_avg_mean = mean(inverse_simpson_avg, na.rm = TRUE),
+    inverse_simpson_avg_median = median(inverse_simpson_avg, na.rm = TRUE),
+    observed_mean = mean(observed, na.rm = TRUE),
+    observed_median = median(observed, na.rm = TRUE)
+  )
+
+# Group by Month
+summary_month <- mean_df %>%
+  group_by(Month) %>%
+  summarise(
+    shannon_avg_mean = mean(shannon_avg, na.rm = TRUE),
+    shannon_avg_median = median(shannon_avg, na.rm = TRUE),
+    inverse_simpson_avg_mean = mean(inverse_simpson_avg, na.rm = TRUE),
+    inverse_simpson_avg_median = median(inverse_simpson_avg, na.rm = TRUE),
+    observed_mean = mean(observed, na.rm = TRUE),
+    observed_median = median(observed, na.rm = TRUE)
+  )
+
+```
+```{r}
+colors <- c("Bell"="blue","GVC"="green","Gonads"="purple", "Rhopalium"="orange","Tentacles"="gold4","Sea water"="deepskyblue3")
+
+mean_df_long <- mean_df %>%
+    pivot_longer(cols = c(shannon_avg),
+                 names_to = "variable",
+                 values_to = "value") %>% 
+    mutate(Month=fct_relevel(Month,"Feb","Jun","Jul"),
+           variable=fct_relevel(variable,'shannon_avg'),
+           Tissue_type=fct_relevel(Tissue_type,"Bell","Gonads","GVC","Tentacles","Sea water"),
+           Jellyfish_number = as.numeric(str_extract(mean_df$sample, "\\d+")))
+
+#Alpha diversity across month and tissue type
+ggplot(mean_df, aes(x = Month, y = shannon_avg, color = Month)) +
+    facet_wrap(~Tissue_type,nrow =1)+
+    geom_violin(trim = T)+
+    geom_jitter(width = 0.2, size = 1)+
+    theme(axis.text.x = element_text(angle=45,hjust=1)) +
+    scale_color_manual(values = c('Feb'='#31cdd3ff',"Jun"="#f54441ff",'Jul'="#ddb63b"))+ 
+    theme_classic()+
+    theme(text = element_text(size = 12),
+          legend.key.size = unit(4, 'mm'),
+          strip.text = element_text(size = 12),
+          legend.text = element_text(size = 12),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none")+
+    labs(x = "", y = "Shannon index") 
+    
+# Create violin plot and box plot for tissue types
+ggplot(mean_df_long, aes(x = Tissue_type, y = value, color = Tissue_type)) +
+    facet_wrap(~variable,scale="free_y")+
+    geom_violin(trim = T)+
+    geom_jitter(width = 0.175, size = 0.8)+
+    #geom_boxplot(width=0.1, outlier.size=2, color="black",alpha=0.2) +
+    theme(axis.text.x = element_text(angle=45,hjust=1)) +
+    scale_color_manual(values = colors)+
+    theme_classic()+
+    theme(text = element_text(size = 12),
+          legend.key.size = unit(4, 'mm'),
+          strip.text = element_text(size = 12),
+          legend.text = element_text(size = 12),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none")+
+    labs(x = "", y = "Shannon index") 
+    
+
+# Create violin plot and box plot for month
+ggplot(mean_df_long, aes(x = Month, y = value, color = Month)) +
+    facet_wrap(~variable,scale="free_y")+
+    geom_violin(trim = T)+
+    geom_jitter(width = 0.25, size = 1)+
+#    geom_boxplot(width=0.1, outlier.size=1, color="black") +
+    theme(axis.text.x = element_text(angle=45,hjust=1)) +
+    scale_color_manual(values = c('Feb'='#31cdd3ff',"Jun"="#f54441ff",'Jul'="#ddb63b"))+
+    theme(text = element_text(size = 12),
+          legend.key.size = unit(4, 'mm'),
+          strip.text = element_text(size = 12),
+          legend.text = element_text(size = 12),
+          strip.background = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "right")+
+    labs(x = "", y = "Shannon index") +
+    theme_classic()
+```
+
+
+```{r}
+#Subset based on specific tissue type
+Tissue_type = c("Bell","Gonads","GVC","Tentacles") #as i only have small sample of Rhoplium i exclude it from the analyis for now
+Sample_type = c("Bell","GVC","Gonads","Rhopalium","Tentacles",'Sea water')
+No_bell= c("Gonads","GVC","Tentacles")
+
+tse_samples <- tse_alpha[, colData(tse_alpha)$Tissue_type %in% Sample_type]
+tse_jelly <- tse_alpha[, colData(tse_alpha)$Tissue_type %in% Tissue_type]
+tse_no_bell <-tse_alpha[, colData(tse_alpha)$Tissue_type %in% No_bell]
+```
+Violin+boxplot diffrences between tissues 
+```{r}
+plots_s <- lapply(c("observed", "inverse_simpson"),
+                plotColData,
+                object = tse_samples,
+                x = "Tissue_type",
+                colour_by = "Tissue_type")
+
+plots_j <- lapply(c("observed","shannon","inverse_simpson"),
+                plotColData,
+                object = tse_jelly,
+                x = "Tissue_type",
+                colour_by = "Tissue_type")
+
+colors <- c("Bell"="blue","GVC"="green","Gonads"="purple", "Rhopalium"="orange","Tentacles"="gold4","Sea water"="deepskyblue3")
+
+plots<-lapply(c(plots_s,plots_j), function(p) {
+  p + 
+    geom_boxplot(width=0.3,outlier=F, color="black",alpha=0.2) +
+    theme(axis.text.x = element_text(angle=45,hjust=1)) +
+    scale_color_manual(values = colors)+
+    theme_bw() +
+    theme(text = element_text(size = 24),
+          legend.key.size = unit(4, 'mm'),
+          strip.text = element_text(size = 24),
+          legend.text = element_text(size = 24),
+          strip.background = element_blank(),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "right")
+})
+
+ggpubr::ggarrange(plotlist = plots[1:2], nrow = 1.5, ncol= 2, common.legend = TRUE, legend = "none")
+
+alpha_b_g_g_t<-ggpubr::ggarrange(plotlist = plots[3:5], nrow = 1.5, ncol= 3, common.legend = TRUE, legend = "none")
+```
+```{r}
+ggsave("alpha_four_tissue.pdf", plot = alpha_b_g_g_t, width = 10, height = 5)
+```
+
+
+```{r}
+plots_j <- lapply(c("observed", "shannon"),
+                plotColData,
+                object = tse_no_bell,
+                x = "Month",
+                colour_by = "Tissue_type")
+
+colors <- c("Bell"="blue","GVC"="green","Gonads"="purple", "Rhopalium"="orange","Tentacles"="gold4","Sea water"="deepskyblue3")
+
+plots<-lapply(c(plots_s,plots_j), function(p) {
+  p + 
+    geom_boxplot(width=0.3,outlier=F, color="black",alpha=0.2) +
+    theme(axis.text.x = element_text(angle=45,hjust=1)) +
+    scale_color_manual(values = colors)
+})
+
+ggpubr::ggarrange(plotlist = plots[1:2], nrow = 1.5, ncol= 2, common.legend = TRUE, legend = "none")
+ggpubr::ggarrange(plotlist = plots[3:4], nrow = 1.5, ncol= 2, common.legend = TRUE, legend = "none")
+
+```
+
+#Artool 
+Significant check between tissues
+```{r}
+# Run Aligned ranks transformation (ART)
+model_inv_simpson=art(inverse_simpson_avg~Tissue_type, mean_df) #inverse Simpson
+model_shannon=art(shannon_avg~Tissue_type, mean_df) #Shannon
+model_observed=art(observed~Tissue_type, mean_df)#observed
+summary(model_inv_simpson)
+# run anova on art object     
+anova(model_inv_simpson)
+anova(model_shannon)
+anova(model_observed)
+
+# Run Aligned Ranked Transform Contrasts (pair wise between tissue types)
+pair_tissue_inv_simpson = art.con(model_inv_simpson, "Tissue_type")
+pair_tissue_shannon = art.con(model_shannon, "Tissue_type")
+pair_tissue_observed = art.con(model_observed, "Tissue_type")
+
+#summaries
+pair_tissue_inv_simpson
+pair_tissue_shannon
+pair_tissue_observed
+
+# Run Aligned ranks transformation (ART)
+ 
+```
+## Significant check between month
+```{r}
+# Run Aligned ranks transformation (ART)
+model_inv_simpson=art(inverse_simpson_avg~Month + (1|sample), mean_df) #inverse Simpson
+model_shannon=art(shannon_avg~Month, mean_df) #Shannon
+model_observed=art(observed~Month, mean_df)#observed
+
+# run anova on art object     
+anova(model_inv_simpson)
+anova(model_shannon)
+anova(model_observed)
+
+# Run Aligned Ranked Transform Contrasts (pair wise between tissue types)
+pair_month_inv_simpson = art.con(model_inv_simpson, "Month")
+pair_month_shannon = art.con(model_shannon, "Month")
+pair_month_observed = art.con(model_observed, "Month")
+
+#summaries
+pair_month_inv_simpson
+pair_month_shannon
+pair_month_observed
+```
+# ART_ANOVA for Tissue and Month
+```{r}
+# List of tissue types
+tissue_types <- c("Bell", "Gonads", "Tentacles", "GVC")
+
+# Loop over each tissue type
+for(tissue in tissue_types){
+  
+  # Subset the data for the current tissue type
+  subset_df <- mean_df[mean_df$Tissue_type == tissue,]
+  
+  # Run Aligned ranks transformation (ART)
+  model_shannon = art(shannon_avg ~ Month, data = subset_df)
+  
+  # Run ANOVA on ART object
+  anova_result = anova(model_shannon)
+  
+  # Print the ANOVA table
+  print(paste("ANOVA results for tissue type:", tissue))
+  print(anova_result)
+  
+  # Run Aligned Ranked Transform Contrasts (pairwise between months)
+  pair_month_shannon = art.con(model_shannon, "Month")
+  
+  # Print the summaries
+  print(paste("Pairwise contrasts for tissue type:", tissue))
+  print(summary(pair_month_shannon))
+}
+```
+
+

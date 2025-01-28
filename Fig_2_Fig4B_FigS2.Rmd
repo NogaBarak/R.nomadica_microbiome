@@ -1,0 +1,454 @@
+---
+title: "PD_Schloss_NMDs_with_rarefaction"
+output: html_notebook
+---
+
+# calculte distance with vegdist (vegan)
+Here i'm following Schloss tutorial/ paper(https://doi.org/10.1101/2023.06.23.546313).
+We can also see from my rarefaction curve that most of the sample are already in saturation in this seq point so I'm not losing a lot of data.
+I also exclude the sampling from 2019 (the only sampling we didn't use separate tool kit for each tissue)
+Before removing it, I preform the analysis with all of the sample as well
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggplot2)
+library(microbiomer)
+library(phyloseq)
+library(pairwiseAdonis)
+library(ggpubr)
+library(ARTool)
+library(glue)
+library(dplyr)
+library(gridExtra)
+```
+# Upload phyloseq object 
+```{r}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/processed_data")
+
+# Load phyloseq 
+biome_phyloseq<-readRDS("./bloom_phyloseq")
+sample_data(biome_phyloseq)$Tissue_type <- ifelse(grepl("Bw", sample_data(biome_phyloseq)$Sample_name), "Bell wounded", sample_data(biome_phyloseq)$Tissue_type)
+taxa_names(biome_phyloseq) <- paste0("ASV", seq(ntaxa(biome_phyloseq))) 
+
+# Adding a column into the OTU table containing ASV_Genus column (useful in ASV graphic analysis)
+asv_taxa_meta<-tax_table(biome_phyloseq) %>% 
+         as.data.frame() %>% 
+         rownames_to_column(var = "OTU") %>% 
+         mutate(ASV_Genus = glue("{OTU}:{Genus}"))%>% 
+         column_to_rownames(var = "OTU") %>% 
+         tax_table() 
+        
+col<-c("Kingdom", "Phylum" ,"Class" , "Order"  ,"Family" ,"Genus",'ASV_Genus') 
+row<-taxa_names(biome_phyloseq)
+
+taxa_names(asv_taxa_meta)<-row
+colnames(asv_taxa_meta@.Data)<-col
+
+tax_table(biome_phyloseq)<-asv_taxa_meta  
+
+#Only jellyfish samples 
+phy_jelly <- biome_phyloseq %>% 
+                   subset_samples(., Tissue_type %in% c("Bell","Tentacles","GVC","Gonads")&
+                                     Year!="2019") %>% 
+                   prune_taxa(taxa_sums(.) > 99, .) %>% 
+                   prune_samples(sample_sums(.) > 14000, .)%>%  
+                   pres_abund_filter(., pres = 2,abund =0, verbose = TRUE)
+
+```
+
+```{r}
+# this is the ASVs table, i called it shared file to fit the tutorial I'm following 
+metadata<- sample_data(phy_jelly) %>% 
+           as_tibble(.) %>% 
+           mutate(Sample_name= glue("{Sample_name}_{Month}"))
+
+otu_table<-otu_table (phy_jelly) %>% 
+            t() %>%  
+            as.data.frame () %>% 
+            mutate(Group=metadata$Sample_name) %>%
+            pivot_longer(-Group) 
+
+shared<- otu_table %>% 
+            pivot_wider(Group) %>%
+            as.data.frame()
+rownames(shared)<-shared$Group
+
+shared_matrix<-shared %>% 
+        .[,-1] %>% 
+        as.matrix(.)
+```
+
+```{r}
+set.seed(220389)
+dist_all<-avgdist(shared_matrix, dmethod="bray", sample=min(sample_sums(phy_jelly)),iterations=100)
+nmds_all<-metaMDS(dist_all,k=3)
+
+   stress_all<-nmds_all$stress %>%
+      format(digits = 2)
+
+    scores_all<- scores(nmds_all) %>%
+      as.data.frame() %>%
+      mutate(Sample_name=rownames(.))%>%
+      right_join(.,metadata,by="Sample_name") %>%
+      na.omit() %>%
+      select(Sample_name,Tissue_type,Month,everything())
+
+    centroid_all<- scores_all %>% 
+    group_by(Tissue_type) %>% 
+    summarize(NMDS1=mean(NMDS1),NMDS2=mean(NMDS2),NMDS3=mean(NMDS3)) %>% 
+    as_data_frame()
+```
+
+
+```{r}
+Tissue_color = c("Bell"="#0E4CAA","GVC"="green","Gonads"="purple", "Rhopalium"="orange","Tentacles"="gold4","Sea water"="deepskyblue3")
+
+# Create a list of x and y pairs
+xy_list <- list(one = c("NMDS1", "NMDS2"), two = c("NMDS1", "NMDS3"), three = c("NMDS2", "NMDS3"))
+
+# Define the function to create the plot
+create_plot <- function(xy) {
+  x <- xy[1]
+  y <- xy[2]
+  ggplot(scores_all, aes_string(x = x, y = y ,color = "Tissue_type")) +
+    geom_point(size=3,alpha=0.8)+
+    stat_ellipse(aes(group = Tissue_type, color = Tissue_type),
+                 linetype  = 2,
+                 level=0.85,
+                 show.legend = FALSE) +
+    scale_color_manual(values = Tissue_color)+
+    scale_fill_manual(values = Tissue_color)+
+    annotate("text", x =.5, y = -.5, label = paste0("stress: ", stress_all), hjust = 0) +
+    theme_bw()+
+    theme(text = element_text(size = 12),
+          legend.key.size = unit(4, 'mm'),
+          strip.text = element_text(size = 12),
+          legend.text = element_text(size = 12),
+          strip.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position = "right")+
+    coord_cartesian(xlim = c(.65, -.65), ylim = c(.65, -.65))+
+    labs(x = x, y = y, color = "Tissue type")
+}
+
+# Use lapply to apply the function to each pair in the list
+plots <- lapply(xy_list, create_plot)
+```
+
+# Check statistic 
+```{r}
+adonis2(dist_all~scores(nmds_all))
+pairwise.adonis(dist_all, scores_all$Sampling_date)
+bd_bell <- betadisper(bell_dist, results_nmds[['B']]$scores$Month)
+anova(bd_bell)
+permutest(bd_bell)
+TukeyHSD(bd_bell)
+```
+
+```{r}
+ggsave("./nmds_all_month_3d.pdf", plot = all_month_3d, width = 16, height = 5)
+ggsave("./NMDS/seawater_tissue_3d.pdf", plot = seawater_tissue_3d, width = 16, height = 5)
+```
+#calculte distance with vegdist (vegan) and bray curtis
+```{r}
+set.seed(220389)
+tissue<-c("B","T","V","G")
+
+results_nmds <- list()
+
+for (i in tissue ){
+    count_table <- otu_table %>%
+      select(Group,value) %>%
+      filter(grepl(i,Group)) %>%
+      group_by(Group) %>%
+      summarize(total = sum(value)) %>%
+      arrange(total) %>%
+      print(n=20)
+
+    min_n_seq <- min(count_table$total)
+
+    shared_sub <- shared[grepl(i, rownames(shared)),-1]
+
+    dist<-avgdist(shared_sub, dmethod="bray", sample=min_n_seq,iterations =100)
+    nmds<-metaMDS(dist)
+
+    stress<-nmds$stress %>%
+      format(digits = 2)
+
+    scores<- scores(nmds) %>%
+      as.data.frame() %>%
+      mutate(Sample_name=rownames(.))%>%
+      right_join(.,metadata,by="Sample_name") %>%
+      na.omit() %>%
+      select(Sample_name,Month,everything())
+
+    centroid<- scores %>% 
+    group_by(Month) %>% 
+    summarize(NMDS1=mean(NMDS1),NMDS2=mean(NMDS2)) %>% 
+    as_data_frame()
+    
+    
+    # Store results for current tissue type
+    results_nmds[[i]]<-list(min_n_seq=min_n_seq,
+                          scores=scores,
+                          stress=stress,
+                          centroid=centroid,
+                          dist=dist)
+}
+```
+# Plot NMDS for each tissue_type
+```{r}
+# Define month colors
+month_colors <- c(
+  'Feb' = '#31cdd3ff',
+  'Jun' = '#f54441ff',
+  'Jul' = '#ddb63b'
+)
+
+set.seed(220389)
+
+# Define tissue types
+tissue <- c("B", "T", "V", "G")
+
+# Helper function to create a plot for a given tissue type
+create_nmds_plot <- function(tissue_type) {
+  scores <- results_nmds[[tissue_type]]$scores %>% as_tibble()
+  stress <- results_nmds[[tissue_type]]$stress
+  centroid <- results_nmds[[tissue_type]]$centroid %>% as_tibble()
+
+  ggplot(scores, aes(x = NMDS1, y = NMDS2, color = Month)) +
+    geom_point(size = 3) +
+    stat_ellipse(
+      aes(group = Month),
+      linetype = 2,
+      level = 0.9,
+      show.legend = FALSE
+    ) +
+    scale_color_manual(values = month_colors, limits = c('Feb', 'Jun', 'Jul')) +
+    geom_point(
+      data = centroid,
+      color = "black",
+      size = 4,
+      shape = 21,
+      aes(fill = Month), # Map fill to Month for centroids
+      show.legend = FALSE
+    ) +
+    scale_fill_manual(values = month_colors) + # Add fill scale for centroids
+    annotate("text", x = 1.05, y = -1, label = paste0("stress: ", stress), hjust = 0) +
+    theme_bw(base_size = 12) +
+    theme(
+      legend.key.size = unit(4, 'mm'),
+      strip.text = element_text(size = 12),
+      strip.background = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.position = "right"
+    ) +
+    coord_cartesian(xlim = c(-1.05, 1.05), ylim = c(-1.05, 1.05)) +
+    labs(x = "NMDS1", y = "NMDS2", color = "Month", title = paste0("Tissue Type: ", tissue_type))
+}
+
+# Generate plots for all tissue types
+plots <- lapply(tissue, create_nmds_plot)
+
+# View the plots in a grid
+nmds_no_2019 <- grid.arrange(grobs = plots[c(1, 4, 3, 2)], nrow = 1)
+```
+
+```{r}
+save.image("./NMDS.rds")
+ggsave("./nmds_no_2019.pdf", plot = nmds_no_2019, width = 22, height = 5)
+```
+
+# Adonis (PERMANOVA) and betadisper
+```{r}
+bell_dist<-results_nmds[['B']]$dist
+gonads_dist<-results_nmds[['G']]$dist
+gvc_dist<-results_nmds[['V']]$dist
+tentacles_dist<-results_nmds[['T']]$dist
+
+adonis2(bell_dist~results_nmds[['B']]$scores$Month)
+pairwise.adonis(bell_dist, results_nmds[['B']]$scores$Month)
+bd_bell <- betadisper(bell_dist, results_nmds[['B']]$scores$Month)
+anova(bd_bell)
+permutest(bd_bell)
+TukeyHSD(bd_bell)
+
+adonis2(gonads_dist~results_nmds[['G']]$scores$Month)
+pairwise.adonis(gonads_dist, results_nmds[['G']]$scores$Month)
+bd_gonads <- betadisper(gonads_dist, results_nmds[['G']]$scores$Month)
+anova(bd_gonads)
+permutest(bd_gonads)
+TukeyHSD(bd_gonads)
+
+adonis2(gvc_dist~results_nmds[['V']]$scores$Month)
+pairwise.adonis(gvc_dist, results_nmds[['V']]$scores$Month)
+bd_gvc <- betadisper(gvc_dist, results_nmds[['V']]$scores$Month)
+anova(bd_gvc)
+permutest(bd_gvc)
+TukeyHSD(bd_gvc)
+
+adonis2(tentacles_dist~results_nmds[['T']]$scores$Month)
+pairwise.adonis(tentacles_dist, results_nmds[['T']]$scores$Month)
+bd_tentacles<- betadisper(tentacles_dist, results_nmds[['T']]$scores$Month)
+anova(bd_tentacles)
+permutest(bd_tentacles)
+TukeyHSD(bd_tentacles)
+```
+
+#Jitter ordinations plot 
+```{r}
+dist_jitter_all<-dist_all%>% 
+  as.matrix() %>% 
+  as_tibble(rownames = "samples") %>% 
+  pivot_longer(-samples) %>% 
+  filter(samples < name)
+
+  
+jitter_tissue<-dist_jitter_all %>% 
+      as.data.frame() %>%
+      separate(samples, into=c("Sample_name_a", "Month_a"), "_", convert=TRUE) %>%
+      separate(name, into=c("Sample_name_b", "Month_b"), "_", convert=TRUE) %>%
+      mutate(Tissue_type_a= case_when(grepl("G",Sample_name_a)~ "Gonads",
+                                      grepl("B",Sample_name_a)~ "Bell",
+                                      grepl("V",Sample_name_a)~ "GVC",
+                                      grepl("T",Sample_name_a)~ "Tentacles"),
+             Tissue_type_b= case_when(grepl("G",Sample_name_b)~ "Gonads",
+                                      grepl("B",Sample_name_b)~ "Bell",
+                                      grepl("V",Sample_name_b)~ "GVC",
+                                      grepl("T",Sample_name_b)~ "Tentacles"),
+             comparison = case_when(
+                                      Tissue_type_a == "Bell" &  Tissue_type_b == "Bell"  ~ "Bell",
+                                      Tissue_type_a == "Gonads" &  Tissue_type_b == "Gonads"  ~ "Gonads",
+                                      Tissue_type_a == "GVC" &  Tissue_type_b == "GVC"  ~ "GVC",
+                                      Tissue_type_a == "Tentacles" &  Tissue_type_b == "Tentacles"  ~ "Tentacles",
+    TRUE ~ NA_character_)) %>% 
+  drop_na() 
+
+jitter_month<-dist_jitter_all %>% 
+      as.data.frame() %>%
+      separate(samples, into=c("Sample_name_a", "Month_a"), "_", convert=TRUE) %>%
+      separate(name, into=c("Sample_name_b", "Month_b"), "_", convert=TRUE) %>%
+      mutate(comparison = case_when(
+                                      Month_a == "Feb" &  Month_b == "Feb"  ~ "Feb",
+                                      Month_a == "Jun" &  Month_b == "Jun"  ~ "Jun",
+                                      Month_a == "Jul" &  Month_b == "Jul"  ~ "Jul",
+    TRUE ~ NA_character_),
+    comparison = factor(comparison, levels=c("Feb", "Jun", "Jul"))
+    ) %>% 
+  drop_na()
+ 
+
+ggplot(jitter_month,aes(x=comparison, y=value,color = comparison)) +
+               geom_jitter(width = 0.25, size = 2)+
+               scale_color_manual(values = c('Feb'='#31cdd3ff',"Jun"="#f54441ff",'Jul'="#ddb63b"))+ 
+               theme_classic()+
+               stat_summary(fun.data=median_hilow, color="black", size=1,
+                             fun.args = list(conf.int=0.50))+
+               theme(text = element_text(size = 12),
+                      legend.key.size = unit(4, 'mm'),
+                      strip.text = element_text(size = 12),
+                      legend.text = element_text(size = 12),
+                      legend.position = "none") +
+               labs(x=NULL, y="Bray-Curtis dissimilarity")
+```
+
+
+```{r}
+jitter_tissue_long<-jitter_tissue %>%
+                    select(comparison,value) %>% 
+                    as.tibble() %>% 
+                    mutate(comparison=as_factor(comparison))
+
+jitter_month_long<-jitter_month %>%
+                    select(comparison,value) %>% 
+                    as.tibble() %>% 
+                    mutate(comparison=as_factor(comparison))
+                    
+                    
+model_ordi_all=art(value~comparison, jitter_month_long) #tissue type
+anova(model_ordi_all)
+pair_tissue = art.con(model_ordi_all, "comparison")
+pair_tissue
+
+```
+
+```{r}
+dist_list<-c("B","G","T","V")
+jitter_dis<-list()
+
+for (i in dist_list){
+dist_jitter<-results_nmds[[i]]$dist%>% 
+  as.matrix() %>% 
+  as_tibble(rownames = "samples") %>% 
+  pivot_longer(-samples) %>% 
+  filter(samples < name)
+
+  
+jitter<-dist_jitter %>% 
+      as.data.frame() %>%
+      separate(samples, into=c("Sample_name_a", "Month_a"), "_", convert=TRUE) %>%
+      separate(name, into=c("Sample_name_b", "Month_b"), "_", convert=TRUE) %>%
+      mutate(comparison = case_when(
+                                      Month_a == "Feb" &  Month_b == "Feb"  ~ "Feb",
+                                      Month_a == "Jun" &  Month_b == "Jun"  ~ "Jun",
+                                      Month_a == "Jul" &  Month_b == "Jul"  ~ "Jul",
+    TRUE ~ NA_character_),
+    comparison = factor(comparison, levels=c("Feb", "Jun", "Jul"))
+    ) %>% 
+  drop_na()
+
+jitter_dis[[i]]<-jitter
+}
+
+```
+````{r}
+tissue<-c("B","G","V","T")
+pair_month<-list()
+for(i in tissue) {
+  jitter_long<-jitter_dis[[i]] %>%
+    select(comparison,value) %>% 
+    as.tibble() %>% 
+  mutate(comparison=as_factor(comparison))
+  model_ordi_month=art(value~comparison, jitter_long) #tissue type
+  anova= anova(model_ordi_month)
+  pair_month_i = art.con(model_ordi_month, "comparison")
+
+  pair_month[[i]]<-pair_month_i
+}
+```
+
+```{r}
+set.seed(220389)
+# Define a list of tissue types to plot
+tissue<-c("B","T","V","G")
+
+plots_jitter <- list()
+
+# Loop over tissue types and create a plot for each tissue type
+for (i in tissue) {
+   jitter_dis_i <- jitter_dis[[i]] %>% 
+                 as_tibble()
+  
+p<- ggplot(jitter_dis_i,aes(x=comparison, y=value)) +
+            geom_jitter(width = 0.25, size = 1, color = "grey")+
+           # scale_color_manual(values = c('Feb'='#31cdd3ff',"Jun"="#f54441ff",'Jul'="#ddb63b"))+ 
+            stat_summary(fun.data=median_hilow, color="maroon", size=1,
+                         fun.args = list(conf.int=0.50)) +
+            labs(x=NULL, y="Bray-Curtis distances") +
+            scale_y_continuous(limits=c(0, 1), breaks=seq(0, 1, 0.1)) +
+            theme_classic()+
+            ggtitle(paste("Tissue Type:", i))
+
+  # Store the plot for the current tissue type
+  plots_jitter[[i]] <- p
+}
+
+
+# View the plots for each tissue type
+Jitter_ordi_t_p<-grid.arrange(grobs = plots_jitter, nrow = 1)
+```
+
+
+

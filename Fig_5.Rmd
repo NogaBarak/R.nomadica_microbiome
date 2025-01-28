@@ -1,0 +1,849 @@
+---
+title: "R.nomadica vs published jellyfish comparisom"
+output: html_notebook
+---
+
+The goal of this part is to combine the data from r.nomadica with all other jellyfish I ananlysis. 
+I want to use the combined data to-  
+1. create a ven diagarm for all jellyfish and for rhizostomeae only
+2. make a heatmap showing the relative abundance for all shared ASVs 
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(phyloseq)
+library(microbiomer)
+library(dplyr)
+library(pheatmap)
+library(glue)
+```
+
+#### Upload jellyfish phyloseq
+```{r}
+setwd("C:/Users/barak/OneDrive/Noga_Phd/Jellyfish_research/16S_analysis/Microbiome_jellyfish_project/processed_data/ASVs_comparison/jellyfish_ncbi/")
+
+scyphozoan_ps <- readRDS("./Blooming_Scyphozoan/scyphozoan_ps")
+
+tri_mas_ps<-readRDS("./Marine_lake_jellyfish/tri_mas_ps")
+
+Rhizostoma_pulmo_ps<-readRDS("./Rhizostoma_pulmo/pulmo_filtered_ps.rds")%>% prune_taxa(taxa_sums(.) > 0, .) 
+Cassiopea_xamachana_ps<-readRDS("./Cassiopea xamachana/cassiopea_filtered_ps")%>% prune_taxa(taxa_sums(.) > 0, .) 
+Rhopilema_nomadica_ps<-readRDS("./rhopilema_filtered_ps.rds")%>% prune_taxa(taxa_sums(.) > 0, .)  
+
+
+Tripedalia_cystophora_ps<-tri_mas_ps %>%  subset_samples(.,jellyfish_type=="Tripedalia") %>% prune_taxa(taxa_sums(.) > 0, .) 
+Mastigias_papua_ps<-tri_mas_ps %>% subset_samples(.,jellyfish_type=="Mastigias")%>% prune_taxa(taxa_sums(.) > 0, .) 
+Rhopilema_esculentum_ps<-scyphozoan_ps %>% subset_samples(.,jellyfish_type=="Rhopilema esculentum")%>% prune_taxa(taxa_sums(.) > 0, .) 
+Nemopilema_nomurai_ps<-scyphozoan_ps %>% subset_samples(.,jellyfish_type=="Nemopilema nomurai")%>% prune_taxa(taxa_sums(.) > 0, .) 
+Cyanea_nozakii_ps<-scyphozoan_ps %>% subset_samples(.,jellyfish_type=="Cyanea nozakii") %>% prune_taxa(taxa_sums(.) > 0, .)
+Aurelia_coerulea_ps<-scyphozoan_ps %>% subset_samples(.,jellyfish_type=="Aurelia coerulea")%>% prune_taxa(taxa_sums(.) > 0, .)         
+``` 
+
+# Upload BLAST+ results R,nomadica dominant only
+```{r}
+# Set the file path
+setwd("//wsl.localhost/Ubuntu-22.04/home/noga/Jellfish_16S/ncbi_jellyfish_comparison/")
+
+# Read the file into a data frame
+top10_all_vs_all<- read.table("./top10_all_vs_all.txt", header = F, sep = "\t")
+
+# Define Blast headers
+blast_headers <- c(
+  "Percentage_Identity",
+  "Alignment_Length",
+  "Mismatches",
+  "Gap_Opens",
+  "Q_Start",
+  "Q_End",
+  "S_Start",
+  "S_End",
+  "E_Value",
+  "Bit_Score"
+)
+# Assign names to the columns
+colnames(top10_all_vs_all) <- c("Top10_all","all",blast_headers)
+```
+
+```{r}
+# Define a function to filter out BLAST results
+filter_data <- function(df, asv_col, min_length) {
+  df %>%
+    mutate(asv_num = as.numeric(str_extract(!!sym(asv_col), "\\d+"))) %>%
+    filter(Alignment_Length > min_length) %>%
+    group_by(all) %>%
+    filter(asv_num == min(asv_num)) %>%
+    ungroup() %>% 
+    select(-asv_num) %>% 
+    filter(!str_detect(all, paste0(":", asv_col))) %>% 
+    select(asv_col,all)
+}
+
+# Define a function to reshape the data
+reshape_data <- function(df, asv_col) {
+  df %>%
+    mutate(all_copy = all) %>%
+    separate(all, into = c("ASV", "Genus", "Species"), sep = ":", fill = "right", extra = "merge") %>%
+    pivot_wider(names_from = Species, values_from = all_copy, values_fill = NA) %>%
+    select(asv_col, everything()) %>%
+    group_by(!!sym(asv_col)) %>%
+    summarise(across(everything(), ~na.omit(.x)[1]), .groups = "drop")
+}
+
+# List of all data frames and corresponding ASV columns
+df_list <- list(top10_all_vs_all = "Top10_all")
+
+# Apply the functions to each data frame
+filt_list <- lapply(names(df_list), function(x) {
+  df <- get(x)
+  asv_col <- df_list[[x]]
+  df_filt <- filter_data(df, asv_col, 100)
+  df_reshaped <- reshape_data(df_filt, asv_col) %>% 
+    select(-c(ASV,Genus))
+  assign(paste0(asv_col, "_blast_filt"), df_reshaped, envir = .GlobalEnv)
+})
+```
+
+# Transform all phyloseq to relative abundance
+```{r}
+# Create a list of the glom phyloseq objects
+ps_list <- list(Rhopilema_nomadica_ps,Rhopilema_esculentum_ps,Nemopilema_nomurai_ps,Rhizostoma_pulmo_ps, Cassiopea_xamachana_ps, Mastigias_papua_ps,Aurelia_coerulea_ps, Cyanea_nozakii_ps,Tripedalia_cystophora_ps )
+
+# Create a list of names for your phyloseq objects
+names_list <- c("Rhopilema_nomadica","Rhopilema_esculentum","Nemopilema_nomurai","Rhizostoma_pulmo", "Cassiopea_xamachana", "Mastigias_papua", "Aurelia_coerulea", "Cyanea_nozakii", "Tripedalia_cystophora")
+
+# Use a for loop to transform each phyloseq object and assign it to a new variable
+for (i in seq_along(ps_list)) {
+  assign(paste0(names_list[i], "_ps_rel"), 
+         transform_sample_counts(ps_list[[i]], function(x) x / sum(x) * 100))
+}
+```
+
+# Prune all ASVs to contain only the shared ASVs
+```{r}
+# List of phyloseq objects that need space replacement in jellyfish_type
+replace_space_list <- c("Rhopilema_esculentum", "Nemopilema_nomurai", 
+                        "Cyanea_nozakii", "Aurelia_coerulea")
+
+# Melt the pruned phyloseq objects and replace spaces with underscores in jellyfish_type for some
+for (i in names_list) {
+  if (i %in% replace_space_list) {
+    assign(i, psmelt(get(paste0(i, "_ps_rel"))) %>% mutate(jellyfish_type = str_replace(jellyfish_type, " ", "_")))
+  } else {
+    assign(i, psmelt(get(paste0(i, "_ps_rel"))))
+  }
+}
+
+
+df <- Top10_all_blast_filt %>%
+  mutate(across(-Top10_all, ~ gsub("(ASV\\d+):.*", "\\1", .)))
+```
+
+# Create a distinct taxa df for each jellyfish. calculate mean and max of each taxa relative abundance
+```{r}
+for (obj_name in names_list[-4]) {
+  obj <- get(obj_name)  # Get the actual object using its name
+
+  distinct_max <- obj %>%
+    pivot_longer(c('OTU'),
+                 names_to = "level",
+                 values_to = "taxon") %>%
+    group_by(taxon) %>%
+    mutate(
+      max = max(Abundance),
+      mean = mean(Abundance),
+      prevalence = sum(Abundance > 0) / n_distinct(Sample) * 100, # Prevalence calculation
+      total_samples =  n_distinct(Sample)
+      ) %>%
+    distinct(jellyfish_type, Abundance, max, mean, prevalence,total_samples, taxon)
+  
+  distinct <- distinct_max %>%
+    distinct(taxon, .keep_all = TRUE)
+  
+  # Update the original object with the modified data
+  assign(paste0("distinct_", obj_name), distinct)
+}
+```
+
+# Loop over all jellyfish type, pull relative abundance for eace jellyfish type. 
+```{r}
+calculate_abundance <- function(data, names_list, value) {
+  for (i in names_list) {
+    jellyfish_df <- get(paste0("distinct_", i))
+    
+    # Join data based on the specified value (mean or prevalence)
+    joined_data <- left_join(data, jellyfish_df %>% select(taxon, !!value), by = setNames("taxon", i))
+    data <- joined_data %>%
+      mutate(!!sym(i) := ifelse(!is.na(!!sym(value)), !!sym(value), !!sym(i))) %>%
+      select(-!!value)
+  }
+  return(data)
+}
+```
+
+## Generate Both Outputs
+```{r}
+### Mean_abundance ###
+merged_data_mean_abundance <- calculate_abundance(df, names_list[-4], "mean") %>% 
+  mutate_at(vars(-1), as.numeric) %>%
+  rename(ASVs = Top10_all)
+
+merged_data_mean_abundance[is.na(merged_data_mean_abundance)] <- 0
+
+# Arrange and add ASV order
+merged_data_mean_abundance <- merged_data_mean_abundance %>%
+  arrange(desc(Rhopilema_nomadica)) %>%
+  filter(!grepl(":Rhizostoma_pulmo", ASVs)) %>%
+  mutate(ASVs_new_order = paste0("ASV", row_number())) %>%
+  mutate(ASVs_new_order = paste0(gsub(".*:(.*):.*", "\\1", ASVs), ":", ASVs_new_order))
+
+### Mean_abundance ###
+merged_data_prevalence <- calculate_abundance(df, names_list[-4], "prevalence") %>% 
+  mutate_at(vars(-1), as.numeric) %>%
+  rename(ASVs = Top10_all)
+
+merged_data_prevalence[is.na(merged_data_prevalence)] <- 0
+
+# Arrange prevalence data to match the mean abundance data
+merged_data_prevalence <- merged_data_prevalence %>%
+  arrange(match(ASVs, merged_data_mean_abundance$ASVs))
+
+# Add ASVs_new_order to prevalence data
+merged_data_prevalence <- merged_data_prevalence %>%
+  left_join(
+    merged_data_mean_abundance %>% select(ASVs, ASVs_new_order), 
+    by = "ASVs")
+
+# Create a named vector of new ASV names
+new_names <- setNames(merged_data_mean_abundance$ASVs_new_order, merged_data_mean_abundance$ASVs)  
+```
+
+## Add jellyfish name for the taxa 
+```{r}
+physeq_list <- list(Rhopilema_nomadica_ps,
+                    Rhopilema_esculentum_ps,
+                    Nemopilema_nomurai_ps,
+                    Rhizostoma_pulmo_ps,
+                    Cassiopea_xamachana_ps,
+                    Mastigias_papua_ps,
+                    Aurelia_coerulea_ps,
+                    Cyanea_nozakii_ps,
+                    Tripedalia_cystophora_ps)
+name_list <- c( "Rhopilema_nomadica",
+                'Rhopilema_esculentum',
+                'Nemopilema_nomurai',
+                "Rhizostoma_pulmo",
+                'Cassiopea_xamachana',
+                'Mastigias_papua',
+                'Aurelia_coerulea',
+                'Cyanea_nozakii',
+                'Tripedalia_cystophora')
+
+# Loop through each phyloseq object
+for (i in seq_along(physeq_list)) {
+  # Extract tax_table and perform modifications
+  asv_taxa_meta <- tax_table(physeq_list[[i]]) %>%
+    as.data.frame()
+
+  # Check if 'Species' column exists in the tax_table
+  if ('Species' %in% colnames(asv_taxa_meta)) {
+    # Exclude 'Species' column from the modifications
+    asv_taxa_meta <- asv_taxa_meta %>%
+      subset(select = -Species)
+  }
+
+  # Define name_list[i] outside of mutate
+  name_i <- name_list[[i]]
+
+  # Continue with the modifications using the pipe operator
+  asv_taxa_meta <- asv_taxa_meta %>%
+    rownames_to_column(var = "OTU") %>%
+    mutate(ASV_dataset = glue("{OTU}:{Genus}:{name_i}")) %>%
+    column_to_rownames(var = "OTU") %>%
+    tax_table()
+   
+  # Update tax_table in the original phyloseq object
+  col <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", 'ASV_Genus', 'ASV_dataset')
+  row <- taxa_names(physeq_list[[i]])
+
+  taxa_names(asv_taxa_meta) <- row
+  colnames(asv_taxa_meta@.Data) <- col
+
+  tax_table(tax_table(physeq_list[[i]])) <- asv_taxa_meta
+}
+```
+
+```{r}
+# Initialize an empty dataframe for the combined taxonomy information
+combined_taxonomy <- data.frame()
+
+# Loop through each phyloseq object
+for(physeq_obj in physeq_list) {
+  # Extract the taxonomy table as a dataframe
+  tax_df <- as.data.frame(tax_table(physeq_obj))
+    combined_taxonomy <- rbind(combined_taxonomy, tax_df)
+}
+
+# Set ASV IDs as row names for the final combined dataframe
+rownames(combined_taxonomy) <- combined_taxonomy$ASV_dataset
+
+asv_ids <- names(new_names)
+
+# Replace the specific value directly
+asv_ids[asv_ids == "ASV12:Mycoplasma:Nemopilema_nomurai"] <- "ASV12:Mycoplasma:Rhopilema_esculentum"
+
+# Filter combined_taxonomy to keep only rows with ASVs present in original_asv_names
+filtered_combined_taxonomy <- combined_taxonomy[combined_taxonomy$ASV_dataset %in% asv_ids, ]%>%
+  mutate(ASV_dataset = replace(ASV_dataset, ASV_dataset ==  "ASV12:Mycoplasma:Rhopilema_esculentum","ASV12:Mycoplasma:Nemopilema_nomurai"))
+
+# Set ASV_dataset column as row names
+rownames(filtered_combined_taxonomy) <- filtered_combined_taxonomy$ASV_dataset
+
+# Rename the row names based on the new_names vector
+rownames(filtered_combined_taxonomy) <- new_names[rownames(filtered_combined_taxonomy)]
+
+genus_level_taxa <- combined_taxonomy %>%
+                    filter(ASV_dataset %in% asv_ids)
+```
+
+## Genus level analysis
+```{r}
+# Aggregate phyloseq objects by genus
+genus_ps_list <- lapply(physeq_list, function(physeq_obj) {
+  tax_glom(physeq_obj, taxrank = "Genus")
+})
+
+names(genus_ps_list) <- names_list  # Ensure names match for easy reference
+
+
+# Combine genus names for all jellyfish types
+genus_list<-filtered_combined_taxonomy$Genus
+```
+
+#Calculate Relative Abundance and Prevalence for Genera
+```{r}
+# Initialize lists to store genus-level mean relative abundance and prevalence
+genus_rel_abund_results <- list()
+genus_prevalence_results <- list()
+
+# Loop through each jellyfish type
+for (jellyfish in names_list) {
+  # Extract the genus-level phyloseq object for the current jellyfish
+  genus_ps <- genus_ps_list[[jellyfish]]
+  
+  # Melt the genus-level phyloseq object
+  melted_genus <- psmelt(genus_ps)
+  
+  # Add jellyfish type for clarity
+  melted_genus <- melted_genus %>%
+    mutate(jellyfish_type = jellyfish)
+  
+  # Normalize abundance within each sample to calculate relative abundance
+  genus_rel_abund <- melted_genus %>%
+    group_by(Sample) %>%  # Normalize within each sample
+    mutate(rel_abund = Abundance / sum(Abundance) * 100) %>%
+    ungroup() %>%
+    group_by(jellyfish_type, Genus) %>%  # Aggregate at genus level
+    summarise(mean_rel_abund = mean(rel_abund), .groups = "drop")  # Mean relative abundance
+  
+  # Calculate prevalence
+  total_samples <- n_distinct(melted_genus$Sample)
+  genus_prevalence <- melted_genus %>%
+    group_by(jellyfish_type, Genus, Sample) %>%
+    summarise(present = any(Abundance > 0), .groups = "drop") %>%
+    group_by(jellyfish_type, Genus) %>%
+    summarise(
+      samples_with_genus = sum(present),
+      prevalence = (samples_with_genus / total_samples) * 100,
+      total_samples = total_samples,
+      .groups = "drop"
+    )
+  
+  # Store the results for this jellyfish
+  genus_rel_abund_results[[jellyfish]] <- genus_rel_abund
+  genus_prevalence_results[[jellyfish]] <- genus_prevalence
+}
+
+# Combine all genus-level data into single data frames
+genus_rel_abund_combined <- bind_rows(genus_rel_abund_results)
+genus_prevalence_combined <- bind_rows(genus_prevalence_results)
+```
+
+#Filter Relative Abundance and Prevalence for Genera the connected to the ASVs for previous analysis
+```{r}
+# Filter genus-level relative abundance data
+filtered_genus_rel_abund <- genus_rel_abund_combined %>%
+  filter(Genus %in% genus_list)
+
+# Filter genus-level prevalence data
+filtered_genus_prevalence <- genus_prevalence_combined %>%
+  filter(Genus %in% genus_list)
+
+# Reshape relative abundance data to wide format
+merged_data_genus_rel_abundance <- filtered_genus_rel_abund %>%
+  pivot_wider(
+    names_from = jellyfish_type,
+    values_from = mean_rel_abund,
+    values_fill = 0
+  ) %>%
+  rename(Genus = Genus)  # Ensure column names match desired structure
+
+# Reshape prevalence data to wide format
+merged_data_genus_prevalence <- filtered_genus_prevalence %>%
+  pivot_wider(
+    names_from = jellyfish_type,
+    values_from = prevalence,
+    values_fill = 0
+  ) %>%
+  rename(Genus = Genus)  # Ensure column names match desired structure
+
+# Optionally, create a new column for genus order
+merged_data_genus_rel_abundance <- merged_data_genus_rel_abundance %>%
+  arrange(desc(Rhopilema_nomadica)) %>%  # Adjust ordering column if needed
+  mutate(Genus_new_order = paste0("Genus_", row_number()))
+
+merged_data_genus_prevalence <- merged_data_genus_prevalence %>%
+  arrange(desc(Rhopilema_nomadica)) %>%  # Adjust ordering column if needed
+  mutate(Genus_new_order = paste0("Genus_", row_number()))%>%
+  group_by(Genus) %>%
+  summarise(across(where(is.numeric), sum, na.rm = TRUE)) %>%
+  ungroup()
+
+# Preview the data frames
+head(merged_data_genus_rel_abundance)
+head(merged_data_genus_prevalence)
+
+```
+
+
+```{r}
+colors_order_asvs<-c("Rhizobiales" = "#324664",
+                      'Rhodospirillales'= "#4E6E9C",
+                       "Rickettsiales" ='#7BABF4',
+                       'Rhodobacterales'='#89CFF1',
+                       'Sphingomonadales'='#dcffff',
+                        "Gammaproteobacteria_uncl"="#4B067A",
+                       "Burkholderiales"="#5E0898",
+                       "Oceanospirillales" ="#930CED",
+                         "Alteromonadales"= "#BA64F4",
+                          "Pseudomonadales"= "#DCB0F9",
+                       'Vibrionales'="#EDD7FC",
+                        'Chlamydiales'="#F0A73A",
+                          "Bacillales"='#410011',
+                       "Entomoplasmatales" ="#65001A",
+                         "Mycoplasmatales" ="#843348",
+                      'Spirochaetales'="#e7f48d",
+                      "Flavobacteriales"='#8DCA0B',
+                      "Bacteroidales"= "#364E04",
+                      "Campylobacterales" ="#CDD7A0",
+                      'Synechococcales'="#06d17c",
+                    'Subgroup_2'="grey30")
+```
+## Create heatmap for ASVs comparison 
+```{r}
+heatmap_data <- merged_data_mean_abundance %>% 
+  column_to_rownames(var = "ASVs_new_order") %>% 
+  .[,-1]
+
+heatmap_prevalence <- merged_data_prevalence %>% 
+  column_to_rownames(var = "ASVs_new_order") %>% 
+  .[,-1]
+
+heatmap_data_log<-heatmap_data%>%
+                  mutate(across(everything(), log1p)) %>% 
+                  na.omit() %>% 
+                  t()
+
+# Create a color palette that transitions from blue to white to red
+# Adjust the colors as needed to fit your data range and preferences
+my_colors <- colorRampPalette(c( 'white','#a5f9ec',"#3a9387",'#087766', "#05483f"))(100)
+prev_colors <-  colorRampPalette(c('white', "#FFEDA0", "#FEB24C", "#F03B20",'#bd0404',"#7d0000"))(200)
+
+# Find the range of your log-transformed data to adjust breakpoints in the color scale if needed
+data_range <- range(heatmap_data_log, na.rm = TRUE)
+
+# Adjust the breakpoints for the new color palette
+breaks_prev <- c(seq(0, 5, length.out = 20),   
+                 seq(5.01, 50, length.out = 40),  
+                 seq(50.01, 80, length.out = 50),  
+                 seq(80.01, max(heatmap_prevalence, na.rm = TRUE), length.out = 50))
+
+# Heatmap_data_log contains log-transformed values, where 0s are already mapped to log1p(0) = 0
+breaks <- seq(data_range[1], 4, length.out = length(my_colors))
+
+# Convert Order_annotation to a data frame, set row names, change the levels of the 'Order' column, and arrange the data frame
+Order_annotation <- filtered_combined_taxonomy %>%
+  select(Order,Genus) %>%
+  arrange(Genus) %>% 
+  mutate(Order = factor(Order, levels = names(colors_order_asvs))) %>%
+  arrange(Order) %>% select(Order,Genus)
+
+# Reorder the data frame
+Order_annotation <- Order_annotation %>%
+  arrange(Order)
+
+# Order the columns based on the Order_annotation
+heatmap_data_log_ordered <- heatmap_data_log[, match(row.names(Order_annotation), colnames(heatmap_data_log))]
+heatmap_prevalence_ordered <- heatmap_prevalence[match(row.names(Order_annotation), row.names(heatmap_prevalence)), ]
+  
+heat_taxa_sort<-pheatmap(t(heatmap_data_log_ordered),
+        border_color = "grey70",
+         cellwidth = 25, 
+         cellheight = 10,
+         color = my_colors,
+         breaks = breaks,
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE,
+         annotation_row 	= Order_annotation,
+         annotation_colors = list(Order = colors_order_asvs))
+
+heat_taxa_prevalence<-pheatmap(heatmap_prevalence_ordered,
+         border_color = "grey70",
+         cellwidth = 25, 
+         cellheight = 10,
+         breaks = breaks_prev,
+         color = prev_colors,
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE,
+         annotation_row 	= Order_annotation,
+         annotation_colors = list(Order = colors_order_asvs))
+
+heat_clustered<-pheatmap(t(heatmap_data_log),
+         border_color = "grey70",
+         cellwidth = 25, 
+         cellheight = 10,
+         color = my_colors,
+         breaks = breaks,
+         clustering_distance_rows = "euclidean", # specify or set to NA if row dendrogram is provided
+         clustering_method = "single", # specify or set to NA if row dendrogram is provided
+         cluster_rows = T, # Set to TRUE to enable row clustering, or provide a dendrogram
+         cluster_cols = T, # Disable column clustering
+         annotation_row = Order_annotation,
+         annotation_colors = list(Order = colors_order_asvs))
+```
+```{r}
+setwd("C:/Users/barak/OneDrive - University of Haifa/Noga Phd/Jellyfish_research/16s_analysis/Microbiome_jellyfish_project/processed data/ASVs_comparison/")
+
+# Open a PDF file with specified size
+pdf("./Top_ASVs_all_jelly_heatmap_clustered.pdf", width = 10, height = 10)
+
+# Generate the heatmap
+heat_clustered<-pheatmap(t(heatmap_data_log),
+         border_color = "grey70",
+         cellwidth = 15, 
+         cellheight = 10,
+         color = my_colors,
+         breaks = breaks,
+         clustering_distance_rows = "euclidean", # specify or set to NA if row dendrogram is provided
+         clustering_method = "complete", # specify or set to NA if row dendrogram is provided
+         cluster_rows = T, # Set to TRUE to enable row clustering, or provide a dendrogram
+         cluster_cols = T, # Disable column clustering
+         annotation_row = Order_annotation,
+         annotation_colors = list(Order = colors_order_asvs))
+
+# Close the PDF file
+dev.off()
+```
+
+## Create heatmap for Genus comparison 
+```{r}
+# Prepare heatmap data for genus-level analysis
+heatmap_data_genus <- merged_data_genus_rel_abundance %>% 
+  column_to_rownames(var = "Genus") %>% 
+  .[,names_list]  
+
+heatmap_prevalence_genus <- merged_data_genus_prevalence %>% 
+  column_to_rownames(var = "Genus") %>%  
+  .[,names_list] 
+
+# Log-transform the heatmap data and remove NA rows
+heatmap_data_genus_log <- heatmap_data_genus %>%
+  mutate(across(everything(), log1p)) %>%  # Apply log1p transformation
+  na.omit() %>%  # Remove rows with NA values
+  t()  # Transpose for heatmap
+
+
+# Determine the range of log-transformed data
+data_range_genus <- range(heatmap_data_genus_log, na.rm = TRUE)
+
+# Extract the genus order
+genus_order <- unique(Order_annotation$Genus)
+# Reorder heatmap data columns based on the extracted genus order
+heatmap_data_genus_log_ordered <- heatmap_data_genus_log[, genus_order]
+heatmap_prevalence_genus_ordered_filter <- heatmap_prevalence_genus[genus_order, ]
+
+# Heatmap with sorted taxa for genus-level data
+heat_taxa_sort_genus <- pheatmap(t(heatmap_data_genus_log_ordered),
+        border_color = "grey70",
+        cellwidth = 25, 
+        cellheight = 10,
+        color = my_colors,
+      #  breaks = breaks_genus,
+        cluster_rows = FALSE, 
+        cluster_cols = FALSE,
+        annotation_row = Order_annotation,
+        annotation_colors = list(Order = colors_order_asvs))
+
+heat_prevalence_genus <- pheatmap(heatmap_prevalence_genus_ordered,
+        border_color = "grey70",
+        cellwidth = 25, 
+        cellheight = 10,
+        breaks = breaks_prev,
+        color = prev_colors,
+        cluster_rows = FALSE, 
+        cluster_cols = FALSE,
+        annotation_row = Order_annotation_genus,
+        annotation_colors = list(Order = colors_order_asvs))
+
+# Heatmap with sorted taxa for genus-level data
+heat_taxa_sort_genus <- pheatmap(t(heatmap_data_genus_log_ordered),
+        border_color = "grey70",
+        cellwidth = 25, 
+        cellheight = 10,
+        color = my_colors_genus,
+        breaks = breaks_genus,
+        clustering_distance_rows = "euclidean", 
+        clustering_distance_cols = "euclidean", 
+        cluster_rows = FALSE, 
+        cluster_cols = FALSE,
+        annotation_row = Order_annotation_genus,
+        annotation_colors = list(Order = colors_order_asvs))
+```
+## Save prevalence and relative abundance data
+```{r}
+write.csv(heatmap_prevalence_genus_ordered_filter %>% t(),"./prevalence_genus_table.csv")
+write.csv(heatmap_prevalence_ordered %>% t(),"./prevalence_asvs_table.csv")
+write.csv(heatmap_data_genus %>% t(),"./rel_abund_genus_table.csv")
+write.csv(heatmap_data %>% t(),"./rel_abund_asvs_table.csv")
+```
+
+
+# bubble plot
+```{r}
+# Find the maximum Relative_abundance for each ASV
+max_abundance <- final_data_mean_abundance %>%
+  group_by(ASVs) %>%
+  summarise(max_abundance = max(Relative_abundance)) %>%
+  ungroup()
+
+# Rank the ASVs by max_abundance
+max_abundance <- max_abundance %>%
+  mutate(rank = rank(-max_abundance, ties.method = "first"))
+
+# Split the ASVs into taxa and ASV number
+# Create new ASV names with the taxa detail and the rank
+asv_split <- separate(max_abundance, ASVs, into = c("ASV", "Taxa", "Origin"), sep = ":") %>%
+  mutate(new_ASVs = paste0(Taxa, ":ASV", rank))
+  
+# Create a named vector for easy lookup of new ASV names
+name_change <- setNames(asv_split$new_ASVs, max_abundance$ASVs)
+
+# Change the ASVs column in the original dataframe
+final_data_mean_abundance$ASVs <- name_change[final_data_mean_abundance$ASVs]
+
+# Keep only the top 10 ASVs for each Species
+top_ASVs <- final_data_mean_abundance %>%
+  group_by(Species) %>%
+  slice_max(Relative_abundance, n = 10) %>%
+  ungroup() %>% 
+  mutate(top_ASV = paste("Top 10", Species))
+
+# Join the top_ASV column to the original dataframe
+final_data_mean_abundance_try <- final_data_mean_abundance %>%
+  left_join(top_ASVs %>% select(ASVs,Species, top_ASV), by = c("ASVs", "Species")) %>%
+  mutate(top_ASV = ifelse(is.na(top_ASV), "Not Top 10", top_ASV)) %>% 
+  mutate(ASVs_new=ASVs) %>% 
+  separate(ASVs, into = c("Taxa", "ASV"), sep = ":")
+  
+# Keep the row with the highest 'Relative_abundance' for each 'ASVs'
+final_data_mean_abundance_order <- final_data_mean_abundance_try %>%
+  group_by(ASVs_new) %>%
+  slice_max(Relative_abundance) %>%
+  ungroup()
+
+# Order the ASVs based on the relative abundance
+ordered_ASVs <- final_data_mean_abundance_order %>%
+  arrange(Taxa)%>%
+  pull(ASVs_new)
+
+
+
+# Create the bubble plot
+break_size <- c(0.01,0.1,1, 10,20,30,45)
+# Define the color mapping
+color_mapping <- c("Top 10 Mastigias_papua" = "maroon",
+                   "Not Top 10" = "black",
+                   "Top 10 Cyanea_nozakii" = "maroon",
+                   "Top 10 Rhopilema_nomadica" = "maroon",
+                   "Top 10 Rhopilema_esculentum" = "maroon",
+                   "Top 10 Cassiopea_xamachana" = "maroon",
+                   "Top 10 Tripedalia_cystophora" = "maroon",
+                   "Top 10 Nemopilema_nomurai" = "maroon",
+                   "Top 10 Aurelia_coerulea" = "maroon")
+
+# Add the color mapping to your plot
+ggplot(final_data_mean_abundance_try, aes(y = factor(ASVs_new, levels = ordered_ASVs), x = Species, size = Relative_abundance, color = top_ASV)) +
+  geom_point(alpha = 1) +
+  scale_size(range = c(1,9), breaks = break_size) +
+  scale_color_manual(values = color_mapping) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 410, hjust = 1, size = 9),
+        axis.text.y = element_text(size = 9),
+        legend.position = "right",
+        legend.title = element_text(size = 9)) +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  ggtitle("mean relative abundance")
+
+
+```
+
+```{r}
+setwd("C:/Users/barak/OneDrive - University of Haifa/Noga Phd/Jellyfish_research/16s_analysis/Microbiome_jellyfish_project/processed data/ASVs_comparison/jellyfish_ncbi")
+
+write.csv(final_data_max_abundance,"./comparison_plots/max_comparison_25_top_ASVS_table.csv")
+write.csv(final_data_mean_abundance,"./comparison_plots/mean_comparison_25_top_ASVS_table.csv")
+
+ggsave(filename="./comparison_plots/mean_comparison_25_top_ASVS.pdf", plot = mean, width = 8.5, height = 9.5,dpi = 300)
+
+```
+
+
+# Transfor data (maybe i dont need this part)
+```{r}
+Species_col<- names(merged_data_max_abundance)[2:9]
+process_final_data <- function(data) {
+  # Reshape the data to a longer format
+  long_data <- data %>%
+    pivot_longer(
+      cols = Species_col,
+      names_to = "Species",
+      values_to = "Relative_abundance"
+    )
+
+ final_data <- long_data %>%
+    filter(Relative_abundance != 0) %>% 
+    mutate(log_Relative_abundance = log1p(Relative_abundance),
+    Species = factor(Species, levels = c("Rhopilema_nomadica",
+                                         "Rhopilema_esculentum",
+                                         "Nemopilema_nomurai",
+                                         "Cassiopea_xamachana",
+                                         "Mastigias_papua",
+                                         "Aurelia_coerulea",
+                                         "Cyanea_nozakii",
+                                         "Tripedalia_cystophora"))) %>% 
+    arrange(Species) # Order by Species levels
+return(final_data)
+}
+
+# Apply the function to both data frames
+final_data_mean_abundance <- process_final_data(merged_data_mean_abundance) %>% 
+  mutate(ASV_number = as.numeric(gsub("ASV(\\d+).*", "\\1", ASVs)))
+
+#Arrange your data frame by `Relative_abundance` in descending order
+final_data_mean_abundance <- final_data_mean_abundance %>%
+  arrange(desc(Rhopilema_nomadica))
+
+# Create a new column `ASVs_new_order` with the new order
+final_data_mean_abundance <- final_data_mean_abundance %>%
+  group_by(ASVs) %>% 
+  mutate(ASVs_new_order = paste0("ASV", row_number()))%>%
+  mutate(ASVs_new_order = paste0(gsub(".*:(.*):.*", "\\1", ASVs), ":", ASVs_new_order))
+  
+final_data_max_abundance <- process_final_data(merged_data_max_abundance)%>% 
+  mutate(ASV_number = as.numeric(gsub("ASV(\\d+).*", "\\1", ASVs)))
+```
+
+# Create a tree for jellyfish species 
+```{r}
+library(rotl)
+
+# Your species list
+names_list <- c("Rhopilema_nomadica","Rhopilema_esculentum","Nemopilema_nomurai", "Rhizostoma_pulmo", "Cassiopea_xamachana", "Mastigias_papua", "Aurelia_coerulea", "Cyanea_nozakii", "Tripedalia_cystophora")
+
+# Get the taxonomic IDs for your species
+taxon_ids <- tnrs_match_names(names_list)$ott_id
+
+# Get the phylogenetic tree
+tree <- tol_induced_subtree(ott_ids = taxon_ids)
+
+# Plot the tree
+plot(tree)
+
+bacteria_list <- filtered_combined_taxonomy$Order 
+bacteria_ids <- tnrs_match_names(bacteria_list)$ott_id %>% na.omit()
+tree_bacteria<- tol_induced_subtree(ott_ids = bacteria_ids)
+plot(tree_bacteria)
+```
+
+# creating a tree for arranging heat map
+```{r}
+# Load necessary packages
+library(DECIPHER)
+library(ape)
+library(Biostrings)
+library(ShortRead)
+
+
+# Read in your fasta file
+fastaFile <- readDNAStringSet("./Top_ASVs_all_jellyfish_filt.fasta")
+
+# Define the species groups
+group1 <- c("Rhopilema_nomadica", "Cassiopea_xamachana", "Mastigias_papua", "Tripedalia_cystophora")
+group2 <- c("Aurelia_coerulea", "Rhopilema_esculentum", "Nemopilema_nomurai", "Cyanea_nozakii")
+
+# Define the region you want to trim to for each sequence
+my_sequences_trimmed <- lapply(names(fastaFile), function(name) {
+  species_name <- strsplit(name, ":")[[1]][3]  # Extract species name
+  
+  # Determine start and end positions for trimming
+  if (species_name %in% group1) {
+    start_pos <- length(fastaFile[[name]]) - 230
+    end_pos <- length(fastaFile[[name]])
+  } else if (species_name %in% group2) {
+    start_pos <- 1
+    end_pos <- 231
+  } else {
+    start_pos <- 1  # Default start position
+    end_pos <- 231  # Default end position
+  }
+  
+  subseq(fastaFile[[name]], start = start_pos, end = end_pos)
+})
+
+# Set names for each trimmed sequence based on the original FASTA headers
+names(my_sequences_trimmed) <- names(fastaFile)
+
+# Convert the list back to a DNAStringSet
+my_sequences_trimmed_set <- DNAStringSet(unlist(my_sequences_trimmed))
+
+
+# Rename the sequences in the DNAStringSet
+names(my_sequences_trimmed_set) <- c[names(my_sequences_trimmed_set)]
+
+# Replace NA values
+names(my_sequences_trimmed_set)[is.na(names(my_sequences_trimmed_set))] <- "ASV12:Mycoplasma"
+
+# Write FASTA
+writeXStringSet(my_sequences_trimmed_set, filepath = "Top_ASVs_V4_only.fasta")
+```
+# Phyloegentic tree
+```{r}
+# Perform multiple sequence alignment
+aligned_seqs <- AlignSeqs(DNAStringSet(my_sequences_trimmed_set))
+
+# Convert the DNAStringSet to a phyDat object
+phy_data <- as.DNAbin(aligned_seqs)
+phylo_dist_matrix <- dist.dna(phy_data,model = "TN93",pairwise.deletion = T)
+hc <- hclust(as.dist(phylo_dist_matrix))
+taxa_order <- hc$order
+# Ensure the order is mapped to names
+taxa_order <- names(my_sequences_trimmed_set)[hc$order]
+# Build a neighbor-joining tree
+nj_tree <- nj(phylo_dist_matrix)
+
+# Root the tree using a specific taxon as the outgroup
+desired_outgroup <- "ASV12:Synechococcus_CC9902:Mastigias_papua"
+tree_rooted <- root(nj_tree, outgroup = desired_outgroup, resolve.root = TRUE)
+
+
+# Plot the tree with updated tip labels
+plot(nj_tree,cex=0.8)
+```
